@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime, time as dtime
+from datetime import date
 
 from sqlalchemy import (
     Boolean, DateTime, ForeignKey, Integer, Text, Time, Float, CheckConstraint, func
@@ -97,4 +98,58 @@ class ScheduleEvent(Base):
             name="ck_schedule_events_value_oneof",
         ),
     )
+class UiParDliConfig(Base):
+    __tablename__ = "ui_par_dli_config"
 
+    ui_id: Mapped[str] = mapped_column(
+        ForeignKey("ui_elements.ui_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+
+    start_time: Mapped[dtime] = mapped_column(Time, nullable=False)
+
+    par_target_umol: Mapped[float] = mapped_column(Float, nullable=False)
+    par_deadband_umol: Mapped[float] = mapped_column(Float, nullable=False)
+
+    dli_target_mol: Mapped[float] = mapped_column(Float, nullable=False)
+
+    off_window_start: Mapped[dtime] = mapped_column(Time, nullable=False)
+    off_window_end: Mapped[dtime] = mapped_column(Time, nullable=False)
+
+    fixture_umol_100: Mapped[float] = mapped_column(Float, nullable=False)
+    correction_interval_s: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    par_top_bind_key: Mapped[str] = mapped_column(Text, nullable=False)
+    par_sum_bind_key: Mapped[str] = mapped_column(Text, nullable=False)
+    enabled_bind_key: Mapped[str] = mapped_column(Text, nullable=False)
+    dim_bind_key: Mapped[str] = mapped_column(Text, nullable=False)
+
+    use_capped_dli: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="true")
+    tz: Mapped[str] = mapped_column(Text, nullable=False, server_default="Europe/Riga")
+
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
+class UiParDliState(Base):
+    __tablename__ = "ui_par_dli_state"
+
+    ui_id: Mapped[str] = mapped_column(
+        ForeignKey("ui_elements.ui_id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+
+    local_date: Mapped[date] = mapped_column(nullable=False)
+
+    dli_raw_mol: Mapped[float] = mapped_column(Float, nullable=False, server_default="0")
+    dli_capped_mol: Mapped[float] = mapped_column(Float, nullable=False, server_default="0")
+
+    last_calc_ts: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_sum_par_umol: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    last_control_ts: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_pwm_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
+    last_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+
+    target_reached_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    forced_off: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
+
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())

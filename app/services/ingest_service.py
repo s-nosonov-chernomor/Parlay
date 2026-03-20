@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 import threading
 import time
+import psycopg
+from sqlalchemy.exc import IntegrityError
 from collections import OrderedDict
 from queue import Queue, Full, Empty
 
@@ -60,6 +62,9 @@ class _ParamCache:
             if len(self._d) > self.max_size:
                 self._d.popitem(last=False)
 
+    def delete(self, key: str):
+        with self._lock:
+            self._d.pop(key, None)
 
 class IngestService:
     def __init__(self):
@@ -97,10 +102,31 @@ class IngestService:
     def _resolve_parameter_id(self, session: Session, topic: str) -> int:
         pid = self._cache.get(topic)
         if pid is not None:
+            db_pid = crud.get_parameter_id_by_topic(session, topic)
+            if db_pid is not None:
+                if db_pid != pid:
+                    self._cache.put(topic, db_pid)
+                    return db_pid
+                return pid
+            # если topic исчез из БД
+            self._cache.delete(topic)
+
+        pid = crud.get_parameter_id_by_topic(session, topic)
+        if pid is not None:
+            self._cache.put(topic, pid)
             return pid
+
         pid = crud.upsert_parameter(session, topic)
         self._cache.put(topic, pid)
         return pid
+
+    def _is_missing_partition_error(self, exc: Exception) -> bool:
+        s = str(exc).lower()
+        return (
+            "no partition of relation" in s
+            or "для строки не найдена секция" in s
+            or "no partition found for row" in s
+        )
 
     def _run(self):
         batch: list[tuple[str, bytes]] = []
@@ -125,31 +151,50 @@ class IngestService:
             self._flush(batch)
 
     def _flush(self, batch: list[tuple[str, bytes]]):
+        rows: list[crud.ReadingRow] = []
+
+        # 1) сначала парсим batch в rows один раз
         try:
-            with SessionLocal() as session:
-                rows: list[crud.ReadingRow] = []
+            for topic, payload in batch:
+                pm: ParsedMessage = parse_mqtt_payload(topic, payload)
 
-                for topic, payload in batch:
-                    pm: ParsedMessage = parse_mqtt_payload(topic, payload)
-                    pid = self._resolve_parameter_id(session, pm.topic)
-
-                    raw_to_store = pm.raw if settings.store_raw else None
-
-                    rows.append(
-                        crud.ReadingRow(
-                            topic=pm.topic,
-                            parameter_id=pid,
-                            ts=pm.ts,
-                            trigger=pm.trigger,
-                            status_source=pm.status_source,
-                            status_code=pm.status_code,
-                            status_message=pm.status_message,
-                            silent_for_s=pm.silent_for_s,
-                            value_num=pm.value_num,
-                            value_text=pm.value_text,
-                            raw=raw_to_store,
-                        )
+                # parameter_id пока не знаем, он зависит от session
+                rows.append(
+                    crud.ReadingRow(
+                        topic=pm.topic,
+                        parameter_id=0,  # временно, назначим ниже
+                        ts=pm.ts,
+                        trigger=pm.trigger,
+                        status_source=pm.status_source,
+                        status_code=pm.status_code,
+                        status_message=pm.status_message,
+                        silent_for_s=pm.silent_for_s,
+                        value_num=pm.value_num,
+                        value_text=pm.value_text,
+                        raw=(pm.raw if settings.store_raw else None),
                     )
+                )
+        except Exception:
+            db_flush_errors_total.inc()
+            logger.exception("MQTT parse failed (batch=%s). Will continue.", len(batch))
+            return
+
+        def _write_once(create_partition_if_needed: bool = False) -> None:
+            with SessionLocal() as session:
+                # 2) resolve parameter_id уже внутри текущей session
+                for r in rows:
+                    r.parameter_id = self._resolve_parameter_id(session, r.topic)
+
+                if create_partition_if_needed and rows:
+                    # создаём партиции по всем месяцам, которые встретились в batch
+                    seen = set()
+                    for r in rows:
+                        key = (r.ts.year, r.ts.month)
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        crud.ensure_reading_partition_for_ts(session, r.ts)
+                    session.commit()
 
                 crud.insert_readings(session, rows)
                 crud.upsert_last(session, rows)
@@ -159,10 +204,8 @@ class IngestService:
                 readings_processed_total.inc(len(batch))
                 ingest_queue_size.set(self.queue.qsize())
 
-                # app/services/ingest_service.py (в _flush после commit)
                 try:
                     for r in crud.latest_per_topic(rows):
-                        # dedup тут можно не делать — hub сам дедупит в батче по topic
                         hub.publish_change_threadsafe(
                             Change(
                                 topic=r.topic,
@@ -176,92 +219,33 @@ class IngestService:
                 except Exception:
                     logger.exception("SSE publish failed (ignored).")
 
-                # ---- UI state SSE on manual_topic changes ----
+        # 3) пробуем обычную запись
+        try:
+            _write_once(create_partition_if_needed=False)
+
+            self._processed += len(batch)
+            if self._processed % 5000 == 0:
+                logger.info("Processed=%s dropped=%s qsize=%s", self._processed, self._dropped, self.queue.qsize())
+
+        except IntegrityError as e:
+            if self._is_missing_partition_error(e):
+                logger.warning("Missing reading partition detected. Creating partition(s) and retrying.")
                 try:
-                    latest = list(crud.latest_per_topic(rows))
-                    changed_topics = {r.topic for r in latest}
+                    _write_once(create_partition_if_needed=True)
 
-                    # какие изменившиеся topics являются manual_topic (из ui_hw_sources)
-                    manual_topics = session.execute(
-                        select(UiHwSource.manual_topic).where(UiHwSource.manual_topic.in_(changed_topics))
-                    ).scalars().all()
-                    manual_topics_set = {t for t in manual_topics if t}
-
-                    if manual_topics_set:
-                        # manual_topic -> ui_id
-                        mt_rows = session.execute(
-                            select(UiHwMember.ui_id, UiHwSource.manual_topic)
-                            .select_from(UiHwMember)
-                            .join(UiHwSource, UiHwSource.source_id == UiHwMember.source_id)
-                            .where(UiHwSource.manual_topic.in_(manual_topics_set))
-                        ).all()
-
-                        affected_ui_ids = sorted({str(ui_id) for ui_id, _mt in mt_rows})
-                        if affected_ui_ids:
-                            # mode_requested / schedule_id
-                            st_rows = session.execute(
-                                select(UiElementState.ui_id, UiElementState.mode_requested, UiElementState.schedule_id)
-                                .where(UiElementState.ui_id.in_(affected_ui_ids))
-                            ).all()
-                            st_map = {str(ui_id): (mode_req, sched_id) for ui_id, mode_req, sched_id in st_rows}
-
-                            # manual_topic по ui_id
-                            mt_by_ui_rows = session.execute(
-                                select(UiHwMember.ui_id, UiHwSource.manual_topic)
-                                .select_from(UiHwMember)
-                                .join(UiHwSource, UiHwSource.source_id == UiHwMember.source_id)
-                                .where(UiHwMember.ui_id.in_(affected_ui_ids))
-                            ).all()
-                            manual_topic_by_ui = {str(ui_id): (str(mt) if mt else None) for ui_id, mt in mt_by_ui_rows}
-
-                            latest_map = {r.topic: r for r in latest}
-
-                            def _as_int01(vnum, vtxt):
-                                if vnum is not None:
-                                    return 0 if float(vnum) == 0.0 else 1
-                                if vtxt is None:
-                                    return None
-                                s = str(vtxt).strip().lower()
-                                if s in {"0", "false", "off", "no"}:
-                                    return 0
-                                if s in {"1", "true", "on", "yes"}:
-                                    return 1
-                                return None
-
-                            for ui_id in affected_ui_ids:
-                                mt = manual_topic_by_ui.get(ui_id)
-                                manual_hw = False
-
-                                # значение manual_topic из текущего batch (самое свежее)
-                                if mt and mt in latest_map:
-                                    rr = latest_map[mt]
-                                    bit = _as_int01(rr.value_num, rr.value_text)
-                                    manual_hw = (bit is not None and bit == 0)
-                                    updated_at = rr.ts.isoformat()
-                                else:
-                                    updated_at = datetime.now().isoformat()
-
-                                mode_req, sched_id = st_map.get(ui_id, (None, None))
-                                mode_effective = "MANUAL_HW" if manual_hw else (mode_req or "WEB")
-
-                                hub.publish_ui_state_threadsafe(
-                                    UiStateChange(
-                                        ui_id=ui_id,
-                                        mode_effective=mode_effective,
-                                        mode_requested=mode_req,
-                                        manual_hw=manual_hw,
-                                        manual_topic=mt,
-                                        schedule_id=sched_id,
-                                        updated_at=updated_at,
-                                    )
-                                )
+                    self._processed += len(batch)
+                    if self._processed % 5000 == 0:
+                        logger.info("Processed=%s dropped=%s qsize=%s", self._processed, self._dropped, self.queue.qsize())
+                    return
                 except Exception:
-                    logger.exception("SSE ui_state publish failed (ignored).")
+                    db_flush_errors_total.inc()
+                    logger.exception("Retry after partition creation failed (batch=%s).", len(batch))
+                    return
 
-                self._processed += len(batch)
-                if self._processed % 5000 == 0:
-                    logger.info("Processed=%s dropped=%s qsize=%s", self._processed, self._dropped, self.queue.qsize())
+            db_flush_errors_total.inc()
+            logger.exception("DB flush failed (batch=%s). Will continue.", len(batch))
 
         except Exception:
             db_flush_errors_total.inc()
             logger.exception("DB flush failed (batch=%s). Will continue.", len(batch))
+

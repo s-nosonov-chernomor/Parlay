@@ -11,6 +11,8 @@ from sqlalchemy.orm import Session
 
 from app.db.models import Parameter, Reading, ParameterLast
 
+from datetime import datetime, timezone
+from sqlalchemy import text
 
 @dataclass(slots=True)
 class ReadingRow:
@@ -43,7 +45,6 @@ def upsert_parameter(session: Session, topic: str) -> int:
     pid = session.execute(stmt).scalar_one()
     return int(pid)
 
-
 def insert_readings(session: Session, rows: list[ReadingRow]):
     if not rows:
         return
@@ -63,7 +64,6 @@ def insert_readings(session: Session, rows: list[ReadingRow]):
         for r in rows
     ]
     session.execute(pg_insert(Reading), values)
-
 
 def upsert_last(session: Session, rows: list[ReadingRow]):
     """
@@ -118,3 +118,38 @@ def latest_per_topic(rows: list[ReadingRow]) -> list[ReadingRow]:
         if prev is None or r.ts >= prev.ts:
             latest[r.topic] = r
     return list(latest.values())
+
+def ensure_reading_partition_for_ts(session: Session, ts: datetime) -> None:
+    """
+    Гарантирует наличие месячной партиции reading для timestamp ts.
+    Использует DB-функцию public.create_reading_partition(dt_from, dt_to).
+    """
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+
+    dt_from = ts.astimezone(timezone.utc).replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+
+    if dt_from.month == 12:
+        dt_to = dt_from.replace(year=dt_from.year + 1, month=1)
+    else:
+        dt_to = dt_from.replace(month=dt_from.month + 1)
+
+    session.execute(
+        text("SELECT public.create_reading_partition(:dt_from, :dt_to)"),
+        {
+            "dt_from": dt_from.date(),
+            "dt_to": dt_to.date(),
+        },
+    )
+
+def get_parameter_id_by_topic(session: Session, topic: str) -> int | None:
+    row = session.execute(
+        select(Parameter.id).where(Parameter.topic == topic).limit(1)
+    ).scalar_one_or_none()
+    return int(row) if row is not None else None
+
+def parameter_id_exists(session: Session, pid: int) -> bool:
+    row = session.execute(
+        select(Parameter.id).where(Parameter.id == pid).limit(1)
+    ).scalar_one_or_none()
+    return row is not None

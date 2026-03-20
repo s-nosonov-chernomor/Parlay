@@ -1,11 +1,17 @@
 # app/settings.py
 from pathlib import Path
+import sys
 from pydantic_settings import BaseSettings, SettingsConfigDict
 from pydantic import Field
 
-PROJECT_ROOT = Path(__file__).resolve().parents[1]  # .../Parlay
-ENV_PATH = PROJECT_ROOT / ".env"
+def runtime_root() -> Path:
+    # когда собрали PyInstaller
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent  # папка рядом с exe
+    # дев-режим
+    return Path(__file__).resolve().parents[1]       # .../Parlay
 
+ENV_PATH = runtime_root() / ".env"
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(

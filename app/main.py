@@ -2,12 +2,16 @@
 from __future__ import annotations
 
 import logging
+import sys
+from contextlib import asynccontextmanager
+from pathlib import Path
+
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from starlette.responses import FileResponse
 
 from app.settings import get_settings
-settings = get_settings()
-
 from app.mqtt.client import MqttClient
 from app.services.ingest_service import IngestService
 from app.services.command_service import CommandService
@@ -39,31 +43,109 @@ from app.api.v1.routes_health_grid import router as health_grid_router
 from app.api.v1.routes_health_detail import router as health_detail_router
 from app.api.v1.routes_query import router as query_router
 
+from app.api.v1.routes_ui_par_dli import router as ui_par_dli_router
+from app.services.par_dli_engine import ParDliEngine
+
 from app.runtime import set_ingest
 
-app = FastAPI(title=settings.app_name)
 
 # =========================
-# CORS (для фронта Vite/React)
+# Settings
 # =========================
-# В dev удобно разрешить localhost:5173 и локальные IP.
-# В прод лучше сузить allow_origins до конкретных доменов.
+settings = get_settings()
+
+
+# =========================
+# Helpers (PyInstaller-safe path)
+# =========================
+def resource_path(rel: str) -> Path:
+    # PyInstaller --onefile/--onedir: распаковывает/кладёт рядом, root = sys._MEIPASS
+    if getattr(sys, "frozen", False) and hasattr(sys, "_MEIPASS"):
+        return (Path(sys._MEIPASS) / rel).resolve()
+    # обычный запуск из исходников: .../Parlay/app/main.py -> root=.../Parlay
+    return (Path(__file__).resolve().parents[1] / rel).resolve()
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)s | %(name)s | %(message)s",
+)
+
+# =========================
+# Runtime singletons
+# =========================
+logger = logging.getLogger("app")
+
+limiter = PerTopicDebounce(min_interval_ms=150)
+
+auto_engine = AutoEngine(
+    tick_s=1.0,
+    tz_default="Europe/Riga",
+    max_commands_per_tick=5000,
+)
+priva_engine = PrivaEngine(tick_s=1.0, max_commands_per_tick=5000)
+
+ingest = IngestService()
+mqtt_client = MqttClient(on_message=lambda topic, payload: ingest.push(topic, payload))
+command_service = CommandService(mqtt=mqtt_client)
+
+par_dli_engine = ParDliEngine(
+    tick_s=1.0,
+    tz_default="Europe/Riga",
+    max_commands_per_tick=5000,
+)
+
+# =========================
+# Lifespan (startup/shutdown)
+# =========================
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    # STARTUP
+    ingest.start()
+
+    try:
+        mqtt_client.start()
+        logger.info("MQTT connected")
+    except Exception:
+        logger.exception("MQTT connect failed. Running WITHOUT MQTT.")
+
+    auto_engine.start()
+    priva_engine.start()
+    par_dli_engine.start()
+
+    set_command_service(command_service)
+    set_ingest(ingest)
+    set_limiter(limiter)
+
+    logger.info("Service started")
+
+    yield
+
+    # SHUTDOWN
+    par_dli_engine.stop()
+    priva_engine.stop()
+    auto_engine.stop()
+    mqtt_client.stop()
+    ingest.stop()
+
+    logger.info("Service stopped")
+
+
+app = FastAPI(title=settings.app_name, lifespan=lifespan)
+
+
+# =========================
+# CORS (для dev фронта)
+# =========================
 cors_origins = [
     "http://localhost:5173",
     "http://127.0.0.1:5173",
 ]
 
-# Если фронт открываешь с другого ПК по LAN (например http://192.168.x.x:5173),
-# то удобнее разрешить все origins в dev. Ниже безопасный компромисс:
-# - если env=dev -> allow_origin_regex на локальную сеть
-# - иначе только фиксированный список
 if getattr(settings, "env", "").lower() in ("dev", "development", "local"):
     app.add_middleware(
         CORSMiddleware,
-
         allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1|192\.168\.\d{1,3}\.\d{1,3}|10\.\d{1,3}\.\d{1,3}\.\d{1,3})(:\d+)?$",
         allow_credentials=True,
-
         allow_methods=["*"],
         allow_headers=["*"],
         expose_headers=["Content-Disposition"],
@@ -81,54 +163,22 @@ else:
     )
 
 
-logger = logging.getLogger("app")
-
-limiter = PerTopicDebounce(min_interval_ms=150)
-
-auto_engine = AutoEngine(tick_s=1.0, tz_default="Europe/Riga", max_commands_per_tick=5000)
-priva_engine = PrivaEngine(tick_s=1.0, max_commands_per_tick=5000)
-
-ingest = IngestService()
-mqtt_client = MqttClient(on_message=lambda topic, payload: ingest.push(topic, payload))
-command_service = CommandService(mqtt=mqtt_client)
-
-@app.on_event("startup")
-def _startup():
-    ingest.start()
-
-    try:
-        mqtt_client.start()
-        logger.info("MQTT connected")
-    except Exception:
-        logger.exception("MQTT connect failed. Running WITHOUT MQTT.")
-
-    auto_engine.start()
-    priva_engine.start()
-    set_command_service(command_service)
-    set_ingest(ingest)
-    set_limiter(limiter)
-    logger.info("Service started")
-
-@app.on_event("shutdown")
-def _shutdown():
-    priva_engine.stop()
-    auto_engine.stop()
-    mqtt_client.stop()
-    ingest.stop()
-    logger.info("Service stopped")
-
+# =========================
+# Health
+# =========================
 @app.get("/health")
 def health():
     return {"ok": True, "env": settings.env}
 
 
+# =========================
 # API v1
+# =========================
 app.include_router(parameters_router, prefix="/v1")
 app.include_router(readings_router, prefix="/v1")
 app.include_router(commands_router, prefix="/v1")
-app.include_router(health_router)
-app.include_router(metrics_router)
 app.include_router(stream_router, prefix="/v1")
+
 app.include_router(ui_router, prefix="/v1")
 app.include_router(ui_mode_router, prefix="/v1")
 app.include_router(schedules_router, prefix="/v1")
@@ -140,3 +190,35 @@ app.include_router(cabinets_router, prefix="/v1")
 app.include_router(health_grid_router, prefix="/v1")
 app.include_router(health_detail_router, prefix="/v1")
 app.include_router(query_router, prefix="/v1")
+
+# misc (без /v1)
+app.include_router(health_router)
+app.include_router(metrics_router)
+app.include_router(ui_par_dli_router, prefix="/v1")
+
+# =========================
+# Frontend (Vite dist) serving
+# =========================
+DIST_DIR = resource_path("frontend/dist")
+
+if DIST_DIR.exists():
+    # 1) Отдаем /assets/* и все файлы dist
+    app.mount("/", StaticFiles(directory=str(DIST_DIR), html=True), name="frontend")
+
+    # 2) SPA fallback для react-router (важно: НЕ ломать /v1/*)
+    @app.get("/{full_path:path}")
+    def spa_fallback(full_path: str):
+        if full_path.startswith("v1/") or full_path == "v1":
+            return {"detail": "Not found"}
+        index = DIST_DIR / "index.html"
+        return FileResponse(str(index))
+
+if __name__ == "__main__":
+    import uvicorn
+
+    uvicorn.run(
+        app,  # <-- ВАЖНО: объект, не "app.main:app"
+        host=settings.http_host,
+        port=settings.http_port,
+        log_level="info",
+    )

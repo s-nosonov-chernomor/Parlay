@@ -281,3 +281,21 @@ GET /v1/cabinets/{source_id}/snapshot
 
 👉 Сейчас это не мешает (lastEventId у тебя не используется).
 Когда захочешь “resume” — скажешь, я дам серверный патч: добавить last_event_id: Optional[str] = Query(None).
+
+КАК ЧИСТИТЬ ТАБЛИЦУ:
+TRUNCATE TABLE
+    reading,
+    parameter_last,
+    parameter,
+    command_log,
+    ui_bindings,
+    ui_elements,
+    ui_element_state,
+    ui_hw_members,
+    ui_hw_sources,
+    ui_priva_bindings,
+    source_bindings,
+    schedules,
+    schedule_events,
+    line_power_config
+RESTART IDENTITY CASCADE;

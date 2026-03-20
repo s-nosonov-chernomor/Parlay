@@ -13,7 +13,7 @@ from app.sse.hub import hub, UiStateChange
 
 router = APIRouter(prefix="/ui", tags=["ui"])
 
-_ALLOWED = {"WEB", "AUTO", "PRIVA", "MANUAL"}
+_ALLOWED = {"WEB", "AUTO", "PRIVA", "PAR_DLI", "MANUAL"}
 
 
 @router.post("/{ui_id}/mode", response_model=UiModeSetOut)
@@ -32,20 +32,18 @@ def set_mode(ui_id: str, payload: UiModeSetIn, db: Session = Depends(get_db)):
             detail="schedule_id is required for AUTO",
         )
 
+    if mode != "AUTO" and payload.schedule_id:
+        payload.schedule_id = None
+
     if not ensure_ui_exists(db, ui_id):
         raise HTTPException(status_code=404, detail="ui_id not found")
 
-    # 1️⃣ обновляем состояние
     updated_at = upsert_ui_state(db, ui_id, mode, payload.schedule_id)
     db.commit()
 
-    # 2️⃣ пересчитываем HW-флаги
     manual_hw, alarm, manual_topic = compute_hw_flags(db, ui_id)
-
-    # 3️⃣ вычисляем effective mode
     mode_effective = "MANUAL_HW" if manual_hw else mode
 
-    # 4️⃣ SSE событие UI state
     hub.publish_ui_state_threadsafe(
         UiStateChange(
             ui_id=ui_id,
@@ -58,7 +56,6 @@ def set_mode(ui_id: str, payload: UiModeSetIn, db: Session = Depends(get_db)):
         )
     )
 
-    # 5️⃣ HTTP ответ
     return UiModeSetOut(
         ui_id=ui_id,
         mode_requested=mode,

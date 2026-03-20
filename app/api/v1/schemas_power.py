@@ -16,7 +16,9 @@ class LinePowerOut(BaseModel):
     ui_id: str
 
     led_power_now: float | None = None
+    led_power_ts: datetime | None = None   # ✅ добавили
     hps_power_now: float | None = None
+    hps_power_ts: datetime | None = None   # ✅ добавили
 
     led_nominal_w: int | None = None
     led_lamps_count: int | None = None

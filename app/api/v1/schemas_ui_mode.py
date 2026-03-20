@@ -6,8 +6,8 @@ from pydantic import BaseModel, Field
 
 
 class UiModeSetIn(BaseModel):
-    mode_requested: str = Field(..., description="WEB|AUTO|PRIVA|MANUAL")
-    schedule_id: str | None = Field(default=None, description="Обязателен для AUTO")
+    mode_requested: str = Field(..., description="WEB|AUTO|PRIVA|PAR_DLI|MANUAL")
+    schedule_id: str | None = Field(default=None, description="Обязателен только для AUTO")
 
 
 class UiModeSetOut(BaseModel):

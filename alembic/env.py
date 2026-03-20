@@ -6,7 +6,9 @@ from logging.config import fileConfig
 from alembic import context
 from sqlalchemy import engine_from_config, pool
 
-from app.settings import settings
+from app.settings import get_settings
+
+settings = get_settings()
 
 from app.db.base import Base
 import app.db.models_all  # noqa: F401  (важно просто импортнуть)
