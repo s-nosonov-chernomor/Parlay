@@ -8,118 +8,50 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_db
 from app.api.v1.schemas_par_dli import (
     UiParDliConfigIn,
+    UiParDliConfigUpdateIn,
     UiParDliConfigOut,
-    UiParDliStateOut,
 )
 from app.db import par_dli_crud
 
 
-router = APIRouter(prefix="/ui", tags=["ui"])
+router = APIRouter(prefix="/par-dli", tags=["par-dli"])
 
 
-@router.get("/{ui_id}/par-dli", response_model=UiParDliConfigOut)
-def get_par_dli_config(ui_id: str, db: Session = Depends(get_db)):
-    cfg = par_dli_crud.load_config(db, ui_id)
-    if not cfg:
+@router.get("", response_model=list[UiParDliConfigOut])
+def list_par_dli_configs(db: Session = Depends(get_db)):
+    rows = par_dli_crud.list_configs(db)
+    return [UiParDliConfigOut(**r) for r in rows]
+
+
+@router.get("/{par_id}", response_model=UiParDliConfigOut)
+def get_par_dli_config(par_id: str, db: Session = Depends(get_db)):
+    row = par_dli_crud.get_config(db, par_id)
+    if not row:
         raise HTTPException(status_code=404, detail="PAR_DLI config not found")
-
-    return UiParDliConfigOut(
-        ui_id=cfg.ui_id,
-        start_time=cfg.start_time,
-        par_target_umol=cfg.par_target_umol,
-        par_deadband_umol=cfg.par_deadband_umol,
-        dli_target_mol=cfg.dli_target_mol,
-        off_window_start=cfg.off_window_start,
-        off_window_end=cfg.off_window_end,
-        fixture_umol_100=cfg.fixture_umol_100,
-        correction_interval_s=cfg.correction_interval_s,
-        par_top_bind_key=cfg.par_top_bind_key,
-        par_sum_bind_key=cfg.par_sum_bind_key,
-        enabled_bind_key=cfg.enabled_bind_key,
-        dim_bind_key=cfg.dim_bind_key,
-        use_capped_dli=cfg.use_capped_dli,
-        tz=cfg.tz,
-        updated_at=cfg.updated_at,
-    )
+    return UiParDliConfigOut(**row)
 
 
-@router.put("/{ui_id}/par-dli", response_model=UiParDliConfigOut)
-def put_par_dli_config(ui_id: str, payload: UiParDliConfigIn, db: Session = Depends(get_db)):
-    if not par_dli_crud.ui_exists(db, ui_id):
-        raise HTTPException(status_code=404, detail="ui_id not found")
+@router.post("", response_model=UiParDliConfigOut)
+def create_par_dli_config(payload: UiParDliConfigIn, db: Session = Depends(get_db)):
+    if par_dli_crud.get_config(db, payload.par_id):
+        raise HTTPException(status_code=409, detail="par_id already exists")
 
-    updated_at = par_dli_crud.upsert_config(db, ui_id, payload)
+    row = par_dli_crud.create_config(db, payload)
     db.commit()
-
-    return UiParDliConfigOut(
-        ui_id=ui_id,
-        start_time=payload.start_time,
-        par_target_umol=payload.par_target_umol,
-        par_deadband_umol=payload.par_deadband_umol,
-        dli_target_mol=payload.dli_target_mol,
-        off_window_start=payload.off_window_start,
-        off_window_end=payload.off_window_end,
-        fixture_umol_100=payload.fixture_umol_100,
-        correction_interval_s=payload.correction_interval_s,
-        par_top_bind_key=payload.par_top_bind_key,
-        par_sum_bind_key=payload.par_sum_bind_key,
-        enabled_bind_key=payload.enabled_bind_key,
-        dim_bind_key=payload.dim_bind_key,
-        use_capped_dli=payload.use_capped_dli,
-        tz=payload.tz,
-        updated_at=updated_at,
-    )
+    return UiParDliConfigOut(**row)
 
 
-@router.get("/{ui_id}/par-dli/state", response_model=UiParDliStateOut)
-def get_par_dli_state(ui_id: str, db: Session = Depends(get_db)):
-    st = par_dli_crud.load_state(db, ui_id)
-    if not st:
-        raise HTTPException(status_code=404, detail="PAR_DLI state not found")
+@router.put("/{par_id}", response_model=UiParDliConfigOut)
+def update_par_dli_config(par_id: str, payload: UiParDliConfigUpdateIn, db: Session = Depends(get_db)):
+    row = par_dli_crud.update_config(db, par_id, payload)
+    if not row:
+        raise HTTPException(status_code=404, detail="PAR_DLI config not found")
+    db.commit()
+    return UiParDliConfigOut(**row)
 
-    cfg = par_dli_crud.load_config(db, ui_id)
 
-    par_top_current = None
-    par_sum_current = None
-    progress_pct = None
-
-    if cfg:
-        bindings = par_dli_crud.load_mqtt_bindings(
-            db,
-            ui_id,
-            [cfg.par_top_bind_key, cfg.par_sum_bind_key],
-        )
-        topics = [b.topic for b in bindings.values()]
-        last = par_dli_crud.load_last_values(db, topics)
-
-        b1 = bindings.get(cfg.par_top_bind_key)
-        if b1:
-            vnum, _vtxt, _ts = last.get(b1.topic, (None, None, None))
-            par_top_current = float(vnum) if vnum is not None else None
-
-        b2 = bindings.get(cfg.par_sum_bind_key)
-        if b2:
-            vnum, _vtxt, _ts = last.get(b2.topic, (None, None, None))
-            par_sum_current = float(vnum) if vnum is not None else None
-
-        if cfg.dli_target_mol > 0:
-            base = st.dli_capped_mol if cfg.use_capped_dli else st.dli_raw_mol
-            progress_pct = max(0.0, min(100.0, base / cfg.dli_target_mol * 100.0))
-
-    return UiParDliStateOut(
-        ui_id=st.ui_id,
-        local_date=st.local_date,
-        dli_raw_mol=st.dli_raw_mol,
-        dli_capped_mol=st.dli_capped_mol,
-        last_calc_ts=st.last_calc_ts,
-        last_sum_par_umol=st.last_sum_par_umol,
-        last_control_ts=st.last_control_ts,
-        last_pwm_pct=st.last_pwm_pct,
-        last_enabled=st.last_enabled,
-        target_reached_at=st.target_reached_at,
-        forced_off=st.forced_off,
-        updated_at=st.updated_at,
-        par_top_current=par_top_current,
-        par_sum_current=par_sum_current,
-        progress_pct=progress_pct,
-    )
+@router.delete("/{par_id}")
+def delete_par_dli_config(par_id: str, db: Session = Depends(get_db)):
+    deleted = par_dli_crud.delete_config(db, par_id)
+    db.commit()
+    return {"ok": bool(deleted), "deleted": deleted}

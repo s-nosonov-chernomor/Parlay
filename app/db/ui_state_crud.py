@@ -11,22 +11,32 @@ from app.db.models_ui import UiElement, UiElementState
 
 
 def ensure_ui_exists(session: Session, ui_id: str) -> bool:
-    return session.execute(select(UiElement.ui_id).where(UiElement.ui_id == ui_id)).scalar_one_or_none() is not None
+    return session.execute(
+        select(UiElement.ui_id).where(UiElement.ui_id == ui_id)
+    ).scalar_one_or_none() is not None
 
 
-def upsert_ui_state(session: Session, ui_id: str, mode_requested: str, schedule_id: str | None) -> datetime:
-    """
-    Upsert ui_element_state(ui_id) -> (mode_requested, schedule_id, updated_at=now()).
-    Возвращает updated_at.
-    """
+def upsert_ui_state(
+    session: Session,
+    ui_id: str,
+    mode_requested: str,
+    schedule_id: str | None,
+    par_id: str | None,
+) -> datetime:
     stmt = (
         pg_insert(UiElementState)
-        .values(ui_id=ui_id, mode_requested=mode_requested, schedule_id=schedule_id)
+        .values(
+            ui_id=ui_id,
+            mode_requested=mode_requested,
+            schedule_id=schedule_id,
+            par_id=par_id,
+        )
         .on_conflict_do_update(
             index_elements=[UiElementState.ui_id],
             set_={
                 "mode_requested": mode_requested,
                 "schedule_id": schedule_id,
+                "par_id": par_id,
                 "updated_at": pg_insert(UiElementState).excluded.updated_at,
             },
         )

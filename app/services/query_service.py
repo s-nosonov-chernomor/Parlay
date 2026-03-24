@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from app.db.models import Parameter, Reading
 from app.db.models_ui import UiElement, UiBinding, UiHwMember
 from app.db.models_sources import SourceBinding
+from app.db import par_dli_crud
 
 from sqlalchemy import text, cast
 from sqlalchemy.dialects.postgresql import INTERVAL
@@ -120,6 +121,78 @@ class QueryService:
                     )
                 )
         return resolved
+
+    def resolve_one_binding(self, db: Session, ui_id: str, bind_key: str) -> ResolvedBinding | None:
+        resolved = self.resolve_bindings(db, [ui_id], [bind_key])
+        if not resolved:
+            return None
+        return resolved[0]
+
+    def calc_dli(
+        self,
+        db: Session,
+        ui_ids: list[str],
+        par_sum_bind_key: str,
+        enabled_bind_keys: list[str],
+        start: datetime,
+        end: datetime,
+        dli_cap_umol: float | None,
+    ) -> tuple[list[dict], dict]:
+        if not ui_ids:
+            return [], {"requested_ui_ids": 0, "resolved": 0}
+
+        ui_meta = self._load_ui_meta(db, ui_ids)
+        ui_to_source = self._load_membership(db, ui_ids)
+
+        rows_out: list[dict] = []
+        resolved_count = 0
+
+        for ui_id in ui_ids:
+            par_sum_resolved = self.resolve_one_binding(db, ui_id, par_sum_bind_key)
+            if not par_sum_resolved:
+                continue
+
+            enabled_topics: list[str] = []
+            for bk in enabled_bind_keys:
+                r = self.resolve_one_binding(db, ui_id, bk)
+                if r:
+                    enabled_topics.append(r.topic)
+
+            if not enabled_topics:
+                continue
+
+            dli_raw, dli_capped = par_dli_crud.calc_dli_for_line(
+                session=db,
+                par_sum_topic=par_sum_resolved.topic,
+                enabled_topics=enabled_topics,
+                start_ts=start,
+                end_ts=end,
+                cap_umol=dli_cap_umol,
+            )
+
+            rows_out.append(
+                dict(
+                    ui_id=ui_id,
+                    source_id=ui_to_source.get(ui_id),
+                    zone_code=(ui_meta.get(ui_id) or {}).get("zone_code"),
+                    par_sum_topic=par_sum_resolved.topic,
+                    enabled_topics=enabled_topics,
+                    dli_raw_mol=float(dli_raw),
+                    dli_capped_mol=float(dli_capped),
+                )
+            )
+            resolved_count += 1
+
+        meta = {
+            "requested_ui_ids": len(ui_ids),
+            "resolved": resolved_count,
+            "par_sum_bind_key": par_sum_bind_key,
+            "enabled_bind_keys": enabled_bind_keys,
+            "start": start.isoformat(),
+            "end": end.isoformat(),
+            "dli_cap_umol": dli_cap_umol,
+        }
+        return rows_out, meta
 
     def run(
         self,

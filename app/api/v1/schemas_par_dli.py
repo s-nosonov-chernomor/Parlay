@@ -2,55 +2,95 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, time
+from datetime import datetime, time
 from pydantic import BaseModel, Field, field_validator
 
 
 class UiParDliConfigIn(BaseModel):
+    par_id: str = Field(..., description="Идентификатор сценария, например par_1")
+    title: str | None = Field(default=None, description="Человекочитаемое имя сценария")
+
     start_time: time
 
-    par_target_umol: float = Field(..., ge=0)
-    par_deadband_umol: float = Field(..., ge=0)
+    ppfd_setpoint_umol: float = Field(..., ge=0, description="Уставка регулирования по верхнему PAR")
+    par_deadband_umol: float = Field(..., ge=0, description="Порог чувствительности регулирования")
 
-    dli_target_mol: float = Field(..., ge=0)
+    dli_target_mol: float = Field(..., ge=0, description="Целевой DLI")
+    dli_cap_umol: float | None = Field(default=None, ge=0, description="Порог ограничения DLI, если нужен")
 
     off_window_start: time
     off_window_end: time
 
-    fixture_umol_100: float = Field(..., gt=0)
-    correction_interval_s: int = Field(..., gt=0)
+    fixture_umol_100: float = Field(..., gt=0, description="Сколько umol/m2/s дает 100% ШИМ")
+    correction_interval_s: int = Field(..., gt=0, description="Период коррекции")
 
     par_top_bind_key: str
     par_sum_bind_key: str
-    enabled_bind_key: str
-    dim_bind_key: str
 
-    use_capped_dli: bool = True
+    enabled_bind_keys: list[str] = Field(..., min_length=1)
+    dim_bind_keys: list[str] = Field(..., min_length=1)
+
+    use_dli_cap: bool = True
     tz: str = "Europe/Riga"
 
-    @field_validator(
-        "par_top_bind_key",
-        "par_sum_bind_key",
-        "enabled_bind_key",
-        "dim_bind_key",
-    )
+    @field_validator("par_id", "par_top_bind_key", "par_sum_bind_key")
     @classmethod
-    def _non_empty(cls, v: str) -> str:
+    def _non_empty_str(cls, v: str) -> str:
         s = str(v).strip()
         if not s:
-            raise ValueError("bind_key must not be empty")
+            raise ValueError("value must not be empty")
         return s
+
+    @field_validator("enabled_bind_keys", "dim_bind_keys")
+    @classmethod
+    def _non_empty_list(cls, values: list[str]) -> list[str]:
+        out = []
+        for v in values:
+            s = str(v).strip()
+            if not s:
+                raise ValueError("bind_key must not be empty")
+            out.append(s)
+        return out
+
+
+class UiParDliConfigUpdateIn(BaseModel):
+    title: str | None = None
+
+    start_time: time | None = None
+
+    ppfd_setpoint_umol: float | None = Field(default=None, ge=0)
+    par_deadband_umol: float | None = Field(default=None, ge=0)
+
+    dli_target_mol: float | None = Field(default=None, ge=0)
+    dli_cap_umol: float | None = Field(default=None, ge=0)
+
+    off_window_start: time | None = None
+    off_window_end: time | None = None
+
+    fixture_umol_100: float | None = Field(default=None, gt=0)
+    correction_interval_s: int | None = Field(default=None, gt=0)
+
+    par_top_bind_key: str | None = None
+    par_sum_bind_key: str | None = None
+
+    enabled_bind_keys: list[str] | None = None
+    dim_bind_keys: list[str] | None = None
+
+    use_dli_cap: bool | None = None
+    tz: str | None = None
 
 
 class UiParDliConfigOut(BaseModel):
-    ui_id: str
+    par_id: str
+    title: str | None
 
     start_time: time
 
-    par_target_umol: float
+    ppfd_setpoint_umol: float
     par_deadband_umol: float
 
     dli_target_mol: float
+    dli_cap_umol: float | None
 
     off_window_start: time
     off_window_end: time
@@ -60,33 +100,11 @@ class UiParDliConfigOut(BaseModel):
 
     par_top_bind_key: str
     par_sum_bind_key: str
-    enabled_bind_key: str
-    dim_bind_key: str
 
-    use_capped_dli: bool
+    enabled_bind_keys: list[str]
+    dim_bind_keys: list[str]
+
+    use_dli_cap: bool
     tz: str
 
     updated_at: datetime
-
-
-class UiParDliStateOut(BaseModel):
-    ui_id: str
-    local_date: date
-
-    dli_raw_mol: float
-    dli_capped_mol: float
-
-    last_calc_ts: datetime | None
-    last_sum_par_umol: float | None
-
-    last_control_ts: datetime | None
-    last_pwm_pct: float | None
-    last_enabled: bool | None
-
-    target_reached_at: datetime | None
-    forced_off: bool
-    updated_at: datetime
-
-    par_top_current: float | None = None
-    par_sum_current: float | None = None
-    progress_pct: float | None = None

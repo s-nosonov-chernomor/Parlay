@@ -10,7 +10,14 @@ from app.api.deps import get_db
 from app.api.auth import require_token
 from app.services.query_service import QueryService
 from app.services.excel_export import build_xlsx
-from app.api.v1.schemas_query import QueryRunIn, QueryRunOut, QueryRowOut
+from app.api.v1.schemas_query import (
+    QueryRunIn,
+    QueryRunOut,
+    QueryRowOut,
+    QueryDliIn,
+    QueryDliOut,
+    QueryDliRowOut,
+)
 
 router = APIRouter(prefix="/query", tags=["query"])
 
@@ -58,3 +65,20 @@ def query_export_xlsx(payload: QueryRunIn, db: Session = Depends(get_db)):
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers=headers,
     )
+
+@router.post("/dli", response_model=QueryDliOut)
+def query_dli(payload: QueryDliIn, db: Session = Depends(get_db)):
+    rows, meta = svc.calc_dli(
+        db=db,
+        ui_ids=payload.ui_ids,
+        par_sum_bind_key=payload.par_sum_bind_key,
+        enabled_bind_keys=payload.enabled_bind_keys,
+        start=payload.start,
+        end=payload.end,
+        dli_cap_umol=payload.dli_cap_umol,
+    )
+
+    return {
+        "rows": [QueryDliRowOut(**r) for r in rows],
+        "meta": meta,
+    }

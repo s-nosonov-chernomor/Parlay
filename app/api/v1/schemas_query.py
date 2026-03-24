@@ -30,5 +30,32 @@ class QueryRowOut(BaseModel):
 
 class QueryRunOut(BaseModel):
     rows: list[QueryRowOut]
-    columns: list[str]  # порядок колонок для таблицы
+    columns: list[str]
+    meta: dict
+
+
+class QueryDliIn(BaseModel):
+    ui_ids: list[str] = Field(..., description="Выбранные линии (ui_id карточек)")
+    par_sum_bind_key: str = Field(..., description="bind_key нижнего суммарного PAR датчика")
+    enabled_bind_keys: list[str] = Field(..., description="bind_key включения света")
+    start: datetime
+    end: datetime
+    dli_cap_umol: float | None = Field(default=None, description="Ограничение PAR для capped DLI")
+    limit: int = Field(default=200000, description="Предохранитель")
+
+
+class QueryDliRowOut(BaseModel):
+    ui_id: str
+    source_id: str | None = None
+    zone_code: str | None = None
+
+    par_sum_topic: str
+    enabled_topics: list[str]
+
+    dli_raw_mol: float
+    dli_capped_mol: float
+
+
+class QueryDliOut(BaseModel):
+    rows: list[QueryDliRowOut]
     meta: dict

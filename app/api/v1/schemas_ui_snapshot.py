@@ -1,7 +1,6 @@
-# app/api/v1/schemas_ui_snapshot.py
 from __future__ import annotations
 
-from datetime import date, datetime, time
+from datetime import datetime, time
 from pydantic import BaseModel
 
 
@@ -20,7 +19,7 @@ class UiBindingOut(BaseModel):
     ui_id: str
     bind_key: str
     topic: str | None = None
-    source: str  # mqtt|derived|priva
+    source: str
     value_type: str | None = None
     required: bool = False
     note: str | None = None
@@ -31,6 +30,7 @@ class UiStateOut(BaseModel):
     mode_requested: str | None = None
     mode_effective: str
     schedule_id: str | None = None
+    par_id: str | None = None
     manual_hw: bool
     manual_topic: str | None = None
 
@@ -45,24 +45,17 @@ class TopicLastOut(BaseModel):
     value_text: str | None = None
 
 
-class UiSnapshotOut(BaseModel):
-    page: str
-    elements: list[UiElementOut]
-    bindings: list[UiBindingOut]
-    states: list[UiStateOut]
-    last: list[TopicLastOut]
-
-    par_dli_configs: list[UiParDliConfigSnapOut] = []
-    par_dli_states: list[UiParDliStateSnapOut] = []
-
 class UiParDliConfigSnapOut(BaseModel):
-    ui_id: str
+    par_id: str
+    title: str | None = None
 
     start_time: time
 
-    par_target_umol: float
+    ppfd_setpoint_umol: float
     par_deadband_umol: float
+
     dli_target_mol: float
+    dli_cap_umol: float | None = None
 
     off_window_start: time
     off_window_end: time
@@ -72,30 +65,19 @@ class UiParDliConfigSnapOut(BaseModel):
 
     par_top_bind_key: str
     par_sum_bind_key: str
-    enabled_bind_key: str
-    dim_bind_key: str
 
-    use_capped_dli: bool
+    enabled_bind_keys: list[str]
+    dim_bind_keys: list[str]
+
+    use_dli_cap: bool
     tz: str
     updated_at: datetime
 
 
-class UiParDliStateSnapOut(BaseModel):
-    ui_id: str
-    local_date: date
-
-    dli_raw_mol: float
-    dli_capped_mol: float
-
-    last_calc_ts: datetime | None
-    last_sum_par_umol: float | None
-
-    last_control_ts: datetime | None
-    last_pwm_pct: float | None
-    last_enabled: bool | None
-
-    target_reached_at: datetime | None
-    forced_off: bool
-    updated_at: datetime
-
-    progress_pct: float | None = None
+class UiSnapshotOut(BaseModel):
+    page: str
+    elements: list[UiElementOut]
+    bindings: list[UiBindingOut]
+    states: list[UiStateOut]
+    last: list[TopicLastOut]
+    par_dli_configs: list[UiParDliConfigSnapOut] = []

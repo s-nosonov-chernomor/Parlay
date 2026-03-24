@@ -1,18 +1,17 @@
 # app/services/par_dli_engine.py
-
 from __future__ import annotations
 
 import logging
 import threading
 import time
-from dataclasses import dataclass
-from datetime import datetime, timezone, time as dtime, timedelta
+from datetime import datetime, timezone, time as dtime
 from zoneinfo import ZoneInfo
 
 from app.db.session import SessionLocal
 from app.db import par_dli_crud
 from app.main_runtime import get_command_service
 from app.services.command_service import CommandRequest
+from app.services.bind_resolver import resolve_binding_topic
 
 from app.metrics_par_dli import (
     par_dli_ticks_total,
@@ -53,40 +52,32 @@ def _coerce_float(value_num: float | None, value_text: str | None) -> float | No
         return None
 
 
-def _time_in_window(now_t: dtime, start_t: dtime, end_t: dtime) -> bool:
-    if start_t <= end_t:
-        return start_t <= now_t <= end_t
-    return now_t >= start_t or now_t <= end_t
-
-
-def _is_after_or_equal(now_t: dtime, border_t: dtime) -> bool:
-    return now_t >= border_t
-
-
-def _compute_pwm_pct(par_top: float, par_target: float, fixture_umol_100: float) -> float:
-    required_from_lamps = par_target - par_top
+def _compute_pwm_pct(par_top: float, ppfd_setpoint_umol: float, fixture_umol_100: float) -> float:
+    required_from_lamps = ppfd_setpoint_umol - par_top
     if required_from_lamps <= 0:
         return 0.0
     if required_from_lamps >= fixture_umol_100:
         return 100.0
     return max(0.0, min(100.0, required_from_lamps / fixture_umol_100 * 100.0))
 
-def _local_day_start_utc(now_local: datetime) -> datetime:
-    local_midnight = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
-    return local_midnight.astimezone(timezone.utc)
 
-@dataclass(slots=True)
-class SendDecision:
-    enabled: int
-    pwm_pct: float
+def _is_after_or_equal(now_t: dtime, border_t: dtime) -> bool:
+    return now_t >= border_t
+
+
+def _time_in_window(now_t: dtime, start_t: dtime, end_t: dtime) -> bool:
+    if start_t <= end_t:
+        return start_t <= now_t <= end_t
+    return now_t >= start_t or now_t <= end_t
 
 
 class ParDliEngine:
     """
-    PAR_DLI engine:
-    - регулирует dim по верхнему PAR датчику
-    - считает DLI по нижнему суммарному PAR датчику
-    - отключает по окну off_window и достижению DLI
+    PAR_DLI engine (new architecture):
+    - сценарии живут отдельно по par_id
+    - линии ссылаются на сценарий через ui_element_state.par_id
+    - DLI считаем по истории с начала суток и только в периоды enabled=1
+    - PWM считаем по текущему верхнему PAR
     """
 
     def __init__(
@@ -101,6 +92,9 @@ class ParDliEngine:
 
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
+
+        # cooldown per scenario (par_id)
+        self._last_run_by_par: dict[str, float] = {}
 
     def start(self):
         if self._thread and self._thread.is_alive():
@@ -126,302 +120,198 @@ class ParDliEngine:
             dt = time.time() - t0
             self._stop.wait(max(0.0, self.tick_s - dt))
 
-    def _send_if_needed(
-        self,
-        session,
-        svc,
-        ui_id: str,
-        enabled_topic: str,
-        dim_topic: str,
-        decision: SendDecision,
-        cur_enabled_num: float | None,
-        cur_enabled_txt: str | None,
-        cur_dim_num: float | None,
-        cur_dim_txt: str | None,
-    ) -> int:
-        sent = 0
-
-        cur_enabled = _as_int01(cur_enabled_num, cur_enabled_txt)
-        cur_dim = _coerce_float(cur_dim_num, cur_dim_txt)
-        target_pwm_rounded = round(float(decision.pwm_pct), 3)
-
-        if cur_enabled != decision.enabled:
-            svc.send(
-                session,
-                CommandRequest(
-                    topic=enabled_topic,
-                    value=int(decision.enabled),
-                    as_json=True,
-                    requested_by="par_dli",
-                    correlation_id=ui_id,
-                ),
-            )
-            sent += 1
-
-        if cur_dim is None or abs(float(cur_dim) - target_pwm_rounded) > 1e-6:
-            svc.send(
-                session,
-                CommandRequest(
-                    topic=dim_topic,
-                    value=target_pwm_rounded,
-                    as_json=True,
-                    requested_by="par_dli",
-                    correlation_id=ui_id,
-                ),
-            )
-            sent += 1
-
-        return sent
-
     def tick(self):
         par_dli_ticks_total.inc()
 
         with SessionLocal() as session:
-            ui_ids = par_dli_crud.list_par_dli_states(session)
-            par_dli_elements_total.set(len(ui_ids))
-            if not ui_ids:
+            configs = par_dli_crud.list_configs(session)
+            if not configs:
+                par_dli_elements_total.set(0)
                 return
 
             svc = get_command_service()
 
             sent = 0
             skipped = 0
+            total_ui = 0
 
-            for ui_id in ui_ids:
-                if sent >= self.max_commands_per_tick:
-                    break
+            for cfg in configs:
+                par_id = cfg["par_id"]
 
-                cfg = par_dli_crud.load_config(session, ui_id)
-                if not cfg:
+                # scenario cooldown
+                now_mon = time.time()
+                last_run = self._last_run_by_par.get(par_id, 0.0)
+                if (now_mon - last_run) < float(cfg["correction_interval_s"]):
                     skipped += 1
                     continue
 
-                tz_name = (cfg.tz or self.tz_default).strip() or self.tz_default
+                ui_ids = par_dli_crud.list_ui_for_par(session, par_id)
+                total_ui += len(ui_ids)
+
+                if not ui_ids:
+                    self._last_run_by_par[par_id] = now_mon
+                    continue
+
+                tz_name = (cfg.get("tz") or self.tz_default).strip() or self.tz_default
                 tz = ZoneInfo(tz_name)
                 now_local = datetime.now(tz)
                 now_utc = datetime.now(timezone.utc)
                 now_t = now_local.timetz().replace(tzinfo=None)
-                today_local = now_local.date()
+                day_start_utc = par_dli_crud.local_day_start_utc(now_local)
 
-                st = par_dli_crud.load_state(session, ui_id)
-                is_new_day_state = False
-                if st is None or st.local_date != today_local:
-                    st = par_dli_crud.reset_state_for_day(session, ui_id, today_local)
-                    is_new_day_state = True
+                for ui_id in ui_ids:
+                    if sent >= self.max_commands_per_tick:
+                        break
 
-                bind_map = par_dli_crud.load_mqtt_bindings(
-                    session,
-                    ui_id,
-                    [
-                        cfg.par_top_bind_key,
-                        cfg.par_sum_bind_key,
-                        cfg.enabled_bind_key,
-                        cfg.dim_bind_key,
-                    ],
-                )
-
-                if (
-                    cfg.par_top_bind_key not in bind_map
-                    or cfg.par_sum_bind_key not in bind_map
-                    or cfg.enabled_bind_key not in bind_map
-                    or cfg.dim_bind_key not in bind_map
-                ):
-                    skipped += 1
-                    continue
-
-                manual_topic = par_dli_crud.load_manual_topic(session, ui_id)
-
-                topics = [
-                    bind_map[cfg.par_top_bind_key].topic,
-                    bind_map[cfg.par_sum_bind_key].topic,
-                    bind_map[cfg.enabled_bind_key].topic,
-                    bind_map[cfg.dim_bind_key].topic,
-                ]
-                if manual_topic:
-                    topics.append(manual_topic)
-
-                last = par_dli_crud.load_last_values(session, topics)
-
-                # HW block
-                if manual_topic:
-                    mvnum, mvtxt, _mts = last.get(manual_topic, (None, None, None))
-                    bit = _as_int01(mvnum, mvtxt)
-                    if bit is not None and bit == 0:
-                        skipped += 1
-                        continue
-
-                par_top_topic = bind_map[cfg.par_top_bind_key].topic
-                par_sum_topic = bind_map[cfg.par_sum_bind_key].topic
-                enabled_topic = bind_map[cfg.enabled_bind_key].topic
-                dim_topic = bind_map[cfg.dim_bind_key].topic
-
-                par_top_num, par_top_txt, _ = last.get(par_top_topic, (None, None, None))
-                par_sum_num, par_sum_txt, _ = last.get(par_sum_topic, (None, None, None))
-                cur_enabled_num, cur_enabled_txt, _ = last.get(enabled_topic, (None, None, None))
-                cur_dim_num, cur_dim_txt, _ = last.get(dim_topic, (None, None, None))
-
-                par_top = max(0.0, _coerce_float(par_top_num, par_top_txt) or 0.0)
-                par_sum = max(0.0, _coerce_float(par_sum_num, par_sum_txt) or 0.0)
-
-                # ------------------------------------------------
-                # 1) DLI integrate from sum sensor
-                # ------------------------------------------------
-                if st.last_calc_ts is None:
-                    # recovery after restart / first run during the day:
-                    # restore accumulated DLI from local midnight up to now
-                    day_start_utc = _local_day_start_utc(now_local)
-
-                    if now_utc > day_start_utc:
-                        raw_mol, capped_mol = par_dli_crud.calc_dli_from_history(
-                            session=session,
-                            topic=par_sum_topic,
-                            start_ts=day_start_utc,
-                            end_ts=now_utc,
-                            cap_umol=cfg.par_target_umol,
+                    # HW block
+                    manual_topic = par_dli_crud.load_manual_topic(session, ui_id)
+                    if manual_topic:
+                        mvnum, mvtxt, _mts = par_dli_crud.load_last_values(session, [manual_topic]).get(
+                            manual_topic, (None, None, None)
                         )
-                        st.dli_raw_mol = float(raw_mol)
-                        st.dli_capped_mol = float(capped_mol)
+                        bit = _as_int01(mvnum, mvtxt)
+                        if bit is not None and bit == 0:
+                            skipped += 1
+                            continue
 
-                    st.last_calc_ts = now_utc
-                    st.last_sum_par_umol = par_sum
-                else:
-                    dt_s = max(0.0, (now_utc - st.last_calc_ts).total_seconds())
-                    if dt_s > 0:
-                        prev_sum = float(st.last_sum_par_umol if st.last_sum_par_umol is not None else par_sum)
-                        st.dli_raw_mol += prev_sum * dt_s / 1_000_000.0
-                        st.dli_capped_mol += min(prev_sum, cfg.par_target_umol) * dt_s / 1_000_000.0
-                        st.last_calc_ts = now_utc
-                        st.last_sum_par_umol = par_sum
+                    # resolve required topics
+                    par_top_topic = resolve_binding_topic(session, ui_id, cfg["par_top_bind_key"])
+                    par_sum_topic = resolve_binding_topic(session, ui_id, cfg["par_sum_bind_key"])
 
-                current_dli = st.dli_capped_mol if cfg.use_capped_dli else st.dli_raw_mol
-                target_reached = current_dli >= cfg.dli_target_mol
+                    enabled_topics = [
+                        topic
+                        for topic in (
+                            resolve_binding_topic(session, ui_id, bk)
+                            for bk in cfg["enabled_bind_keys"]
+                        )
+                        if topic
+                    ]
+                    dim_topics = [
+                        topic
+                        for topic in (
+                            resolve_binding_topic(session, ui_id, bk)
+                            for bk in cfg["dim_bind_keys"]
+                        )
+                        if topic
+                    ]
 
-                # ------------------------------------------------
-                # 2) hard off by off_window_end
-                # ------------------------------------------------
-                if _is_after_or_equal(now_t, cfg.off_window_end):
-                    st.forced_off = True
-                    if st.target_reached_at is None and target_reached:
-                        st.target_reached_at = now_utc
-
-                    sent += self._send_if_needed(
-                        session=session,
-                        svc=svc,
-                        ui_id=ui_id,
-                        enabled_topic=enabled_topic,
-                        dim_topic=dim_topic,
-                        decision=SendDecision(enabled=0, pwm_pct=0.0),
-                        cur_enabled_num=cur_enabled_num,
-                        cur_enabled_txt=cur_enabled_txt,
-                        cur_dim_num=cur_dim_num,
-                        cur_dim_txt=cur_dim_txt,
-                    )
-                    st.last_control_ts = now_utc
-                    st.last_pwm_pct = 0.0
-                    st.last_enabled = False
-                    par_dli_crud.save_state(session, st)
-                    continue
-
-                # ------------------------------------------------
-                # 3) DLI reached in off window
-                # ------------------------------------------------
-                if _time_in_window(now_t, cfg.off_window_start, cfg.off_window_end) and target_reached:
-                    if st.target_reached_at is None:
-                        st.target_reached_at = now_utc
-
-                    sent += self._send_if_needed(
-                        session=session,
-                        svc=svc,
-                        ui_id=ui_id,
-                        enabled_topic=enabled_topic,
-                        dim_topic=dim_topic,
-                        decision=SendDecision(enabled=0, pwm_pct=0.0),
-                        cur_enabled_num=cur_enabled_num,
-                        cur_enabled_txt=cur_enabled_txt,
-                        cur_dim_num=cur_dim_num,
-                        cur_dim_txt=cur_dim_txt,
-                    )
-                    st.last_control_ts = now_utc
-                    st.last_pwm_pct = 0.0
-                    st.last_enabled = False
-                    par_dli_crud.save_state(session, st)
-                    continue
-
-                # ------------------------------------------------
-                # 4) before start_time => off
-                # ------------------------------------------------
-                if now_t < cfg.start_time:
-                    sent += self._send_if_needed(
-                        session=session,
-                        svc=svc,
-                        ui_id=ui_id,
-                        enabled_topic=enabled_topic,
-                        dim_topic=dim_topic,
-                        decision=SendDecision(enabled=0, pwm_pct=0.0),
-                        cur_enabled_num=cur_enabled_num,
-                        cur_enabled_txt=cur_enabled_txt,
-                        cur_dim_num=cur_dim_num,
-                        cur_dim_txt=cur_dim_txt,
-                    )
-                    st.last_control_ts = now_utc
-                    st.last_pwm_pct = 0.0
-                    st.last_enabled = False
-                    par_dli_crud.save_state(session, st)
-                    continue
-
-                # ------------------------------------------------
-                # 5) correction interval gate
-                # ------------------------------------------------
-                if st.last_control_ts is not None:
-                    elapsed = (now_utc - st.last_control_ts).total_seconds()
-                    if elapsed < cfg.correction_interval_s:
+                    if not par_top_topic or not par_sum_topic or not enabled_topics or not dim_topics:
                         skipped += 1
-                        par_dli_crud.save_state(session, st)
                         continue
 
-                new_pwm = _compute_pwm_pct(
-                    par_top=par_top,
-                    par_target=cfg.par_target_umol,
-                    fixture_umol_100=cfg.fixture_umol_100,
-                )
+                    topics_for_last = [par_top_topic, par_sum_topic] + enabled_topics + dim_topics
+                    last_map = par_dli_crud.load_last_values(session, topics_for_last)
 
-                deadband_pwm = (cfg.par_deadband_umol / cfg.fixture_umol_100) * 100.0
-                prev_pwm = float(st.last_pwm_pct or 0.0)
+                    # current par_top
+                    par_top_num, par_top_txt, _ = last_map.get(par_top_topic, (None, None, None))
+                    par_top = max(0.0, _coerce_float(par_top_num, par_top_txt) or 0.0)
 
-                if abs(new_pwm - prev_pwm) < deadband_pwm:
-                    skipped += 1
-                    st.last_control_ts = now_utc
-                    par_dli_crud.save_state(session, st)
-                    continue
+                    # current actual enabled (any channel)
+                    current_enabled = False
+                    for topic in enabled_topics:
+                        vnum, vtxt, _ = last_map.get(topic, (None, None, None))
+                        bit = _as_int01(vnum, vtxt)
+                        if bit == 1:
+                            current_enabled = True
+                            break
 
-                enabled = 1 if new_pwm > 0.0 else 0
+                    # representative current dim = first available dim
+                    current_dim = None
+                    for topic in dim_topics:
+                        vnum, vtxt, _ = last_map.get(topic, (None, None, None))
+                        val = _coerce_float(vnum, vtxt)
+                        if val is not None:
+                            current_dim = float(val)
+                            break
 
-                sent += self._send_if_needed(
-                    session=session,
-                    svc=svc,
-                    ui_id=ui_id,
-                    enabled_topic=enabled_topic,
-                    dim_topic=dim_topic,
-                    decision=SendDecision(enabled=enabled, pwm_pct=new_pwm),
-                    cur_enabled_num=cur_enabled_num,
-                    cur_enabled_txt=cur_enabled_txt,
-                    cur_dim_num=cur_dim_num,
-                    cur_dim_txt=cur_dim_txt,
-                )
+                    # ------------------------------------------------
+                    # 1) DLI by history, only while enabled=1
+                    # ------------------------------------------------
+                    dli_raw, dli_capped = par_dli_crud.calc_dli_for_line(
+                        session=session,
+                        par_sum_topic=par_sum_topic,
+                        enabled_topics=enabled_topics,
+                        start_ts=day_start_utc,
+                        end_ts=now_utc,
+                        cap_umol=cfg["dli_cap_umol"],
+                    )
 
-                st.last_control_ts = now_utc
-                st.last_pwm_pct = float(new_pwm)
-                st.last_enabled = bool(enabled)
+                    current_dli = dli_capped if cfg["use_dli_cap"] else dli_raw
+                    target_reached = current_dli >= float(cfg["dli_target_mol"])
 
-                if target_reached and st.target_reached_at is None:
-                    st.target_reached_at = now_utc
+                    # ------------------------------------------------
+                    # 2) enabled decision
+                    # ------------------------------------------------
+                    desired_enabled = 1
 
-                par_dli_crud.save_state(session, st)
+                    if now_t < cfg["start_time"]:
+                        desired_enabled = 0
+                    elif _is_after_or_equal(now_t, cfg["off_window_end"]):
+                        desired_enabled = 0
+                    elif _time_in_window(now_t, cfg["off_window_start"], cfg["off_window_end"]) and target_reached:
+                        desired_enabled = 0
+
+                    # ------------------------------------------------
+                    # 3) pwm decision
+                    # ------------------------------------------------
+                    desired_pwm = _compute_pwm_pct(
+                        par_top=par_top,
+                        ppfd_setpoint_umol=float(cfg["ppfd_setpoint_umol"]),
+                        fixture_umol_100=float(cfg["fixture_umol_100"]),
+                    )
+
+                    if desired_enabled == 0:
+                        desired_pwm = 0.0
+
+                    deadband_pwm = (
+                        float(cfg["par_deadband_umol"]) / float(cfg["fixture_umol_100"])
+                    ) * 100.0
+
+                    # ------------------------------------------------
+                    # 4) send enabled commands if needed
+                    # ------------------------------------------------
+                    if bool(current_enabled) != bool(desired_enabled):
+                        for topic in enabled_topics:
+                            svc.send(
+                                session,
+                                CommandRequest(
+                                    topic=topic,
+                                    value=int(desired_enabled),
+                                    as_json=True,
+                                    requested_by="par_dli",
+                                    correlation_id=par_id,
+                                ),
+                            )
+                            sent += 1
+                    else:
+                        skipped += 1
+
+                    # ------------------------------------------------
+                    # 5) send dim commands if needed
+                    # ------------------------------------------------
+                    if current_dim is None or abs(float(current_dim) - float(desired_pwm)) >= deadband_pwm:
+                        for topic in dim_topics:
+                            svc.send(
+                                session,
+                                CommandRequest(
+                                    topic=topic,
+                                    value=round(float(desired_pwm), 3),
+                                    as_json=True,
+                                    requested_by="par_dli",
+                                    correlation_id=par_id,
+                                ),
+                            )
+                            sent += 1
+                    else:
+                        skipped += 1
+
+                self._last_run_by_par[par_id] = now_mon
 
             session.commit()
 
+            par_dli_elements_total.set(total_ui)
             par_dli_commands_sent_total.inc(sent)
             par_dli_commands_skipped_total.inc(skipped)
 
             if sent:
-                logger.info("PAR_DLI tick: sent=%s skipped=%s elements=%s", sent, skipped, len(ui_ids))
+                logger.info("PAR_DLI tick: sent=%s skipped=%s elements=%s", sent, skipped, total_ui)

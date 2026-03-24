@@ -1,4 +1,3 @@
-# app/api/v1/routes_ui_mode.py
 from __future__ import annotations
 
 from datetime import timezone
@@ -32,13 +31,28 @@ def set_mode(ui_id: str, payload: UiModeSetIn, db: Session = Depends(get_db)):
             detail="schedule_id is required for AUTO",
         )
 
-    if mode != "AUTO" and payload.schedule_id:
+    if mode == "PAR_DLI" and not payload.par_id:
+        raise HTTPException(
+            status_code=400,
+            detail="par_id is required for PAR_DLI",
+        )
+
+    if mode != "AUTO":
         payload.schedule_id = None
+
+    if mode != "PAR_DLI":
+        payload.par_id = None
 
     if not ensure_ui_exists(db, ui_id):
         raise HTTPException(status_code=404, detail="ui_id not found")
 
-    updated_at = upsert_ui_state(db, ui_id, mode, payload.schedule_id)
+    updated_at = upsert_ui_state(
+        db,
+        ui_id=ui_id,
+        mode_requested=mode,
+        schedule_id=payload.schedule_id,
+        par_id=payload.par_id,
+    )
     db.commit()
 
     manual_hw, alarm, manual_topic = compute_hw_flags(db, ui_id)
@@ -60,6 +74,7 @@ def set_mode(ui_id: str, payload: UiModeSetIn, db: Session = Depends(get_db)):
         ui_id=ui_id,
         mode_requested=mode,
         schedule_id=payload.schedule_id,
+        par_id=payload.par_id,
         updated_at=updated_at,
         manual_hw=manual_hw,
         alarm=alarm,
