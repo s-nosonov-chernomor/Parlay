@@ -1,4 +1,3 @@
-# app/api/v1/routes_health_detail.py
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
@@ -8,12 +7,13 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_db
+from app.api.deps import get_db, require_authenticated
 from app.api.v1.schemas_health_detail import CabinetHealthDetail, HealthTopicIssue, LineHealth
 from app.db.models import Parameter, ParameterLast
 from app.db.models_ui import UiHwSource, UiElement, UiBinding, UiHwMember
 from app.db.models_sources import SourceBinding
 from app.settings import get_settings
+
 settings = get_settings()
 
 router = APIRouter(prefix="/cabinets/health", tags=["health"])
@@ -35,8 +35,15 @@ def _rank_issue(sev: str) -> int:
 @router.get("/{source_id}", response_model=CabinetHealthDetail)
 def cabinet_health_detail(
     source_id: str,
-    include_optional: bool = Query(default=True, description="Если false — мониторим только required=true из source_bindings (+manual_topic)"),
-    include_lines: bool = Query(default=True, description="Посчитать health по линиям щита"),
+    include_optional: bool = Query(
+        default=True,
+        description="Если false — мониторим только required=true из source_bindings (+manual_topic)",
+    ),
+    include_lines: bool = Query(
+        default=True,
+        description="Посчитать health по линиям щита",
+    ),
+    current_user=Depends(require_authenticated),
     db: Session = Depends(get_db),
 ):
     now = datetime.now(timezone.utc)
@@ -58,8 +65,7 @@ def cabinet_health_detail(
     if not include_optional:
         sb = [b for b in sb if b.required]
 
-    # topics щита
-    cabinet_topics: list[tuple[str, str | None]] = []  # (topic, bind_key)
+    cabinet_topics: list[tuple[str, str | None]] = []
     for b in sb:
         if b.topic:
             cabinet_topics.append((b.topic, b.bind_key))
@@ -121,14 +127,12 @@ def cabinet_health_detail(
 
     manual_switch_alarm = False
 
-    # вычислим manual семантику: value == 0 => alarm
     if manual_topic:
         rec = last_map.get(manual_topic)
         if rec:
             _, _, _, _, vn, vt = rec
             v = _coerce_float(vn)
             if v is None and vt is not None:
-                # иногда прилетает строкой
                 v = _coerce_float(vt)
             if v is not None and int(v) == 0:
                 manual_switch_alarm = True
@@ -143,7 +147,6 @@ def cabinet_health_detail(
 
         sev, reason = eval_issue(topic)
 
-        # семантическая авария manual==0 — повышаем severity до "alarm"
         if bind_key == "manual" and manual_switch_alarm:
             sev, reason = "alarm", "manual_switch_off"
 
@@ -167,7 +170,6 @@ def cabinet_health_detail(
             )
         )
 
-    # итоговый статус щита
     if not unique_topics:
         status = "unknown"
     else:
@@ -178,22 +180,23 @@ def cabinet_health_detail(
         else:
             status = "green"
 
-    # --- health по линиям (через ui_bindings source=mqtt) ---
+    # --- health по линиям ---
     members_count = 0
     lines_red = lines_yellow = lines_green = lines_unknown = 0
     worst_lines: list[LineHealth] = []
 
     if include_lines:
-        ui_ids = [x for (x,) in db.execute(
-            select(UiHwMember.ui_id).where(UiHwMember.source_id == source_id)
-        ).all()]
+        ui_ids = [
+            x for (x,) in db.execute(
+                select(UiHwMember.ui_id).where(UiHwMember.source_id == source_id)
+            ).all()
+        ]
         members_count = len(ui_ids)
 
         if ui_ids:
             elements = db.execute(select(UiElement).where(UiElement.ui_id.in_(ui_ids))).scalars().all()
             el_map = {e.ui_id: e for e in elements}
 
-            # bindings линий
             lb_rows = db.execute(
                 select(UiBinding.ui_id, UiBinding.bind_key, UiBinding.topic)
                 .where(UiBinding.ui_id.in_(ui_ids))
@@ -216,7 +219,10 @@ def cabinet_health_detail(
                     .join(ParameterLast, ParameterLast.parameter_id == Parameter.id)
                     .where(Parameter.topic.in_(line_topics))
                 ).all()
-                line_last_map = {topic: (ts, sc, sm, silent, vn, vt) for (topic, ts, sc, sm, silent, vn, vt) in rows2}
+                line_last_map = {
+                    topic: (ts, sc, sm, silent, vn, vt)
+                    for (topic, ts, sc, sm, silent, vn, vt) in rows2
+                }
 
             def eval_line_topic(topic: str) -> tuple[str, str | None]:
                 rec = line_last_map.get(topic)
@@ -239,7 +245,6 @@ def cabinet_health_detail(
                             return "warn", f"silent_for_s>={settings.HEALTH_SILENT_WARN_S}"
                 return "ok", None
 
-            # ui_id -> topics
             by_ui: dict[str, list[str]] = {}
             for ui_id, _, topic in lb_rows:
                 if topic:
@@ -288,8 +293,13 @@ def cabinet_health_detail(
                     )
                 )
 
-            # топ худших линий
-            worst_lines.sort(key=lambda x: ({"red": 2, "yellow": 1, "green": 0, "unknown": -1}.get(x.severity, 0), x.bad_topics), reverse=True)
+            worst_lines.sort(
+                key=lambda x: (
+                    {"red": 2, "yellow": 1, "green": 0, "unknown": -1}.get(x.severity, 0),
+                    x.bad_topics,
+                ),
+                reverse=True,
+            )
             worst_lines = worst_lines[:3]
 
     return CabinetHealthDetail(
@@ -297,13 +307,10 @@ def cabinet_health_detail(
         title=title,
         status=status,
         last_updated_at=worst_ts,
-
         manual_topic=manual_topic,
         manual_switch_alarm=manual_switch_alarm,
-
         monitored_topics=len(unique_topics),
         issues=issues,
-
         members_count=members_count,
         lines_red=lines_red,
         lines_yellow=lines_yellow,

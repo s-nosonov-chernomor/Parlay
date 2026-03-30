@@ -1,31 +1,40 @@
-# app/api/v1/routes_cabinets.py
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from sqlalchemy import select
 from sqlalchemy.orm import Session
+from pydantic import BaseModel
 
-from app.api.deps import get_db
-from app.api.auth import require_token
-
+from app.api.deps import get_db, require_authenticated, require_admin
 from app.api.v1.schemas_cabinets import (
-    CabinetOut, CabinetSnapshotOut, CabinetBindingOut, CabinetLineOut, LastValue
+    CabinetOut,
+    CabinetSnapshotOut,
+    CabinetBindingOut,
+    CabinetLineOut,
+    LastValue,
 )
 from app.db.models import Parameter, ParameterLast
-from app.db.models_sources import SourceBinding
 from app.db import source_crud
-
-from pydantic import BaseModel
+from app.services.audit import write_audit
 
 router = APIRouter(prefix="/cabinets", tags=["cabinets"])
 
 
+class SourceBindingIn(BaseModel):
+    bind_key: str
+    topic: str
+    value_type: str | None = None
+    required: bool = False
+    note: str | None = None
+
+
 @router.get("", response_model=list[CabinetOut])
-def list_cabinets(db: Session = Depends(get_db)):
+def list_cabinets(
+    current_user=Depends(require_authenticated),
+    db: Session = Depends(get_db),
+):
     sources = source_crud.list_sources(db)
 
-    # быстро считаем members_count пачкой
-    # (простым способом — для начала; если захочешь, оптимизируем join+group)
     out: list[CabinetOut] = []
     for s in sources:
         members = source_crud.list_source_members(db, s.source_id)
@@ -44,7 +53,11 @@ def list_cabinets(db: Session = Depends(get_db)):
 @router.get("/{source_id}/snapshot", response_model=CabinetSnapshotOut)
 def cabinet_snapshot(
     source_id: str,
-    include_line_bindings: bool = Query(default=True, description="Если False — отдаём только last по линиям без bind_key"),
+    include_line_bindings: bool = Query(
+        default=True,
+        description="Если False — отдаём только last по линиям без bind_key",
+    ),
+    current_user=Depends(require_authenticated),
     db: Session = Depends(get_db),
 ):
     src = source_crud.get_source(db, source_id)
@@ -116,7 +129,6 @@ def cabinet_snapshot(
         )
 
     # 5) lines values
-    # ui_id -> bind_key -> last
     line_val_map: dict[str, dict[str, LastValue]] = {}
     for ui_id, bind_key, topic in line_bindings:
         if not topic:
@@ -155,9 +167,13 @@ def cabinet_snapshot(
         lines=lines,
     )
 
-# app/api/v1/routes_cabinets.py  (ниже)
+
 @router.get("/{source_id}/bindings", response_model=list[CabinetBindingOut])
-def list_cabinet_bindings(source_id: str, db: Session = Depends(get_db)):
+def list_cabinet_bindings(
+    source_id: str,
+    current_user=Depends(require_authenticated),
+    db: Session = Depends(get_db),
+):
     src = source_crud.get_source(db, source_id)
     if not src:
         raise HTTPException(status_code=404, detail="Cabinet not found")
@@ -176,8 +192,14 @@ def list_cabinet_bindings(source_id: str, db: Session = Depends(get_db)):
     ]
 
 
-@router.post("/{source_id}/bindings", dependencies=[Depends(require_token)])
-def upsert_cabinet_binding(source_id: str, payload: SourceBindingIn, db: Session = Depends(get_db)):
+@router.post("/{source_id}/bindings")
+def upsert_cabinet_binding(
+    source_id: str,
+    payload: SourceBindingIn,
+    request: Request,
+    current_user=Depends(require_admin),
+    db: Session = Depends(get_db),
+):
     src = source_crud.get_source(db, source_id)
     if not src:
         raise HTTPException(status_code=404, detail="Cabinet not found")
@@ -191,13 +213,22 @@ def upsert_cabinet_binding(source_id: str, payload: SourceBindingIn, db: Session
         required=payload.required,
         note=payload.note,
     )
+
+    write_audit(
+        db,
+        request,
+        current_user=current_user,
+        action="cabinet_binding_upsert",
+        entity_type="cabinet",
+        entity_id=source_id,
+        bind_key=payload.bind_key,
+        value_json={
+            "topic": payload.topic,
+            "value_type": payload.value_type,
+            "required": payload.required,
+            "note": payload.note,
+        },
+    )
+
     db.commit()
     return {"ok": True}
-
-
-class SourceBindingIn(BaseModel):
-    bind_key: str
-    topic: str
-    value_type: str | None = None
-    required: bool = False
-    note: str | None = None

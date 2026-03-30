@@ -3,10 +3,9 @@ from __future__ import annotations
 
 import json
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, status, Request
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_db
 from app.api.v1.schemas_ui_set import UiSetIn, UiSetOut
 
 from app.db import ui_command_crud
@@ -14,12 +13,21 @@ from app.runtime_limiter import get_limiter
 from app.main_runtime import get_command_service
 from app.services.command_service import CommandRequest
 
+from fastapi import APIRouter, Depends, HTTPException, status, Request
+from app.api.deps import get_db, require_admin
+from app.services.audit import write_audit
 
 router = APIRouter(prefix="/ui", tags=["ui"])
 
 
 @router.post("/{ui_id}/set", response_model=UiSetOut)
-def ui_set(ui_id: str, payload: UiSetIn, db: Session = Depends(get_db)):
+def ui_set(
+    ui_id: str,
+    payload: UiSetIn,
+    request: Request,
+    current_user=Depends(require_admin),
+    db: Session = Depends(get_db),
+):
     # 1) HW block
     manual_hw, _manual_topic = ui_command_crud.compute_manual_hw(db, ui_id)
     if manual_hw:
@@ -61,8 +69,21 @@ def ui_set(ui_id: str, payload: UiSetIn, db: Session = Depends(get_db)):
             as_json=payload.as_json,
             requested_by=payload.requested_by,
             correlation_id=payload.correlation_id,
+
         ),
     )
+
+    write_audit(
+        db,
+        request,
+        current_user=current_user,
+        action="ui_set",
+        entity_type="ui",
+        entity_id=ui_id,
+        bind_key=payload.bind_key,
+        value_json={"value": payload.value, "as_json": payload.as_json},
+    )
+
     db.commit()
 
     topic_on = topic.rstrip("/") + "/on"

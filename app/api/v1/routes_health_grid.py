@@ -1,4 +1,3 @@
-# app/api/v1/routes_health_grid.py
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
@@ -8,12 +7,13 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_db
+from app.api.deps import get_db, require_authenticated
 from app.api.v1.schemas_health import CabinetHealthCell
 from app.db.models import Parameter, ParameterLast
 from app.db.models_ui import UiHwSource
 from app.db.models_sources import SourceBinding
 from app.settings import get_settings
+
 settings = get_settings()
 
 router = APIRouter(prefix="/cabinets/health", tags=["health"])
@@ -35,7 +35,11 @@ def _meta_get_int(meta: dict | None, *keys: str) -> int | None:
 
 @router.get("/grid", response_model=list[CabinetHealthCell])
 def cabinets_health_grid(
-    include_optional: bool = Query(default=True, description="Если false — мониторим только required=true из source_bindings (+manual_topic)"),
+    include_optional: bool = Query(
+        default=True,
+        description="Если false — мониторим только required=true из source_bindings (+manual_topic)",
+    ),
+    current_user=Depends(require_authenticated),
     db: Session = Depends(get_db),
 ):
     """
@@ -110,15 +114,12 @@ def cabinets_health_grid(
             return "missing", "no_last"
         ts, sc, sm, silent = rec
 
-        # stale
         if ts is None or ts < stale_before:
             return "stale", "stale_ts"
 
-        # status_code
         if sc is not None and int(sc) != 0:
             return "crit", f"status_code={sc}"
 
-        # silent_for_s
         if silent is not None:
             try:
                 s_val = int(silent)
@@ -152,9 +153,8 @@ def cabinets_health_grid(
             if mt:
                 monitored_topics.append(mt)
 
-        monitored_topics = list(dict.fromkeys(monitored_topics))  # уникальные, сохраняем порядок
+        monitored_topics = list(dict.fromkeys(monitored_topics))
 
-        # считаем метрики
         bad_status_count = 0
         silent_warn_count = 0
         silent_crit_count = 0
@@ -164,7 +164,7 @@ def cabinets_health_grid(
 
         worst_topic: str | None = None
         worst_reason: str | None = None
-        worst_rank = -1  # ok=0 warn=1 stale=2 crit=3 missing=4 (missing считаем хуже stale)
+        worst_rank = -1
 
         def rank(sev: str) -> int:
             return {"ok": 0, "warn": 1, "stale": 2, "crit": 3, "missing": 4}.get(sev, 0)
@@ -179,14 +179,12 @@ def cabinets_health_grid(
                     last_updated_at = ts
 
             if sev == "crit":
-                # уточним что именно критично (status_code / silent_crit)
                 rec2 = last_map.get(t)
                 if rec2:
                     _, sc, _, silent = rec2
                     if sc is not None and int(sc) != 0:
                         bad_status_count += 1
                     else:
-                        # значит silent_crit
                         silent_crit_count += 1
                 else:
                     bad_status_count += 1
@@ -196,7 +194,7 @@ def cabinets_health_grid(
             elif sev == "stale":
                 stale_count += 1
             elif sev == "missing":
-                stale_count += 1  # для шахматки missing считаем как "stale/нет данных"
+                stale_count += 1
 
             r = rank(sev)
             if r > worst_rank:
@@ -204,13 +202,12 @@ def cabinets_health_grid(
                 worst_topic = t
                 worst_reason = reason
 
-        # итоговый статус
         if not monitored_topics:
             status = "unknown"
         elif bad_status_count > 0 or silent_crit_count > 0:
             status = "red"
         elif stale_count > 0:
-            status = "red"  # на гриде лучше красным: нет данных/просрочено
+            status = "red"
         elif silent_warn_count > 0:
             status = "yellow"
         else:
@@ -220,22 +217,18 @@ def cabinets_health_grid(
             CabinetHealthCell(
                 source_id=s.source_id,
                 title=title,
-
                 cz=_meta_get_int(meta, "cz", "zone", "climate_zone"),
                 row_n=_meta_get_int(meta, "row_n", "row", "rowNum"),
                 col_n=_meta_get_int(meta, "col_n", "col", "colNum"),
                 x=_meta_get_int(meta, "x"),
                 y=_meta_get_int(meta, "y"),
-
                 status=status,
                 last_updated_at=last_updated_at,
-
                 monitored_topics=len(monitored_topics),
                 bad_status_count=bad_status_count,
                 silent_warn_count=silent_warn_count,
                 silent_crit_count=silent_crit_count,
                 stale_count=stale_count,
-
                 worst_topic=worst_topic,
                 worst_reason=worst_reason,
             )

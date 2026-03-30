@@ -48,6 +48,9 @@ from app.services.par_dli_engine import ParDliEngine
 
 from app.runtime import set_ingest
 
+from starlette.middleware.sessions import SessionMiddleware
+from app.api.v1.routes_auth import router as auth_router
+
 
 # =========================
 # Settings
@@ -132,6 +135,14 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(title=settings.app_name, lifespan=lifespan)
 
+app.add_middleware(
+    SessionMiddleware,
+    secret_key="change-me-super-secret-session-key",
+    session_cookie="parlay_session",
+    same_site="lax",
+    https_only=False,   # для localhost; на проде под HTTPS поставить True
+    max_age=60 * 60 * 12,
+)
 
 # =========================
 # CORS (для dev фронта)
@@ -190,11 +201,11 @@ app.include_router(cabinets_router, prefix="/v1")
 app.include_router(health_grid_router, prefix="/v1")
 app.include_router(health_detail_router, prefix="/v1")
 app.include_router(query_router, prefix="/v1")
-
 # misc (без /v1)
 app.include_router(health_router)
 app.include_router(metrics_router)
 app.include_router(ui_par_dli_router, prefix="/v1")
+app.include_router(auth_router, prefix="/v1")
 
 # =========================
 # Frontend (Vite dist) serving

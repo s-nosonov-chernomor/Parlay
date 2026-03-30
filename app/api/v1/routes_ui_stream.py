@@ -8,7 +8,8 @@ from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_db
+
+from app.api.deps import get_db, require_authenticated
 from app.db import ui_snapshot_crud as crud
 from app.sse.hub import hub
 
@@ -20,6 +21,7 @@ router = APIRouter(prefix="/ui/page", tags=["ui"])
 async def ui_page_stream(
     page: str,
     request: Request,
+    current_user=Depends(require_authenticated),
     db: Session = Depends(get_db),
     last_event_id: Optional[str] = Header(default=None, alias="Last-Event-ID"),
 ):

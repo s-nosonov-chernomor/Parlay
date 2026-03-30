@@ -3,7 +3,7 @@ from __future__ import annotations
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_db
+from app.api.deps import get_db, require_authenticated
 from app.api.v1.schemas_ui_snapshot import (
     UiSnapshotOut,
     UiElementOut,
@@ -19,7 +19,7 @@ router = APIRouter(prefix="/ui/page", tags=["ui"])
 
 
 @router.get("/{page}/snapshot", response_model=UiSnapshotOut)
-def page_snapshot(page: str, db: Session = Depends(get_db)):
+def page_snapshot(page: str, current_user=Depends(require_authenticated), db: Session = Depends(get_db)):
     elements = crud.load_elements(db, page)
     ui_ids = [e.ui_id for e in elements]
 

@@ -1,10 +1,14 @@
 from __future__ import annotations
 
 from datetime import timezone
-from fastapi import APIRouter, Depends, HTTPException
+
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_db
+from fastapi import APIRouter, Depends, HTTPException, Request
+from app.api.deps import get_db, require_admin
+from app.services.audit import write_audit
+
+
 from app.api.v1.schemas_ui_mode import UiModeSetIn, UiModeSetOut
 from app.db.ui_state_crud import ensure_ui_exists, upsert_ui_state
 from app.db.ui_compute import compute_hw_flags
@@ -16,7 +20,13 @@ _ALLOWED = {"WEB", "AUTO", "PRIVA", "PAR_DLI", "MANUAL"}
 
 
 @router.post("/{ui_id}/mode", response_model=UiModeSetOut)
-def set_mode(ui_id: str, payload: UiModeSetIn, db: Session = Depends(get_db)):
+def set_mode(
+    ui_id: str,
+    payload: UiModeSetIn,
+    request: Request,
+    current_user=Depends(require_admin),
+    db: Session = Depends(get_db),
+):
     mode = payload.mode_requested.strip().upper()
 
     if mode not in _ALLOWED:
@@ -52,6 +62,19 @@ def set_mode(ui_id: str, payload: UiModeSetIn, db: Session = Depends(get_db)):
         mode_requested=mode,
         schedule_id=payload.schedule_id,
         par_id=payload.par_id,
+    )
+    write_audit(
+        db,
+        request,
+        current_user=current_user,
+        action="ui_mode_set",
+        entity_type="ui",
+        entity_id=ui_id,
+        value_json={
+            "mode_requested": mode,
+            "schedule_id": payload.schedule_id,
+            "par_id": payload.par_id,
+        },
     )
     db.commit()
 

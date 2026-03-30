@@ -3,11 +3,15 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
-from fastapi import APIRouter, Depends, HTTPException
+
 from sqlalchemy import select, func
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_db
+from fastapi import APIRouter, Depends, HTTPException, Request
+from app.api.deps import get_db, require_authenticated, require_admin
+from app.services.audit import write_audit
+
+
 from app.db.models_ui import UiElement, UiBinding
 from app.db.models import Parameter, ParameterLast, Reading
 from app.db import power_crud
@@ -18,7 +22,7 @@ router = APIRouter(prefix="/power", tags=["power"])
 
 
 @router.get("/page/{page}/snapshot", response_model=list[LinePowerOut])
-def power_page_snapshot(page: str, db: Session = Depends(get_db)):
+def power_page_snapshot(page: str, current_user=Depends(require_authenticated), db: Session = Depends(get_db)):
     # 1) линии на странице
     elements = db.execute(
         select(UiElement).where(UiElement.page == page).order_by(UiElement.ui_id.asc())
@@ -165,8 +169,14 @@ def power_page_snapshot(page: str, db: Session = Depends(get_db)):
 
     return out
 
-@router.post("/line/{ui_id}/config", dependencies=[Depends(require_token)])
-def set_line_power_config(ui_id: str, payload: LinePowerConfigIn, db: Session = Depends(get_db)):
+@router.post("/line/{ui_id}/config")
+def set_line_power_config(
+    ui_id: str,
+    payload: LinePowerConfigIn,
+    request: Request,
+    current_user=Depends(require_admin),
+    db: Session = Depends(get_db),
+):
     power_crud.upsert_config(
         db,
         ui_id=ui_id,
@@ -174,6 +184,13 @@ def set_line_power_config(ui_id: str, payload: LinePowerConfigIn, db: Session = 
         led_lamps_count=payload.led_lamps_count,
         hps_nominal_w=payload.hps_nominal_w,
         hps_lamps_count=payload.hps_lamps_count,
+    )
+    write_audit(
+        db, request, current_user=current_user,
+        action="power_config_set",
+        entity_type="ui",
+        entity_id=ui_id,
+        value_json=payload.model_dump(),
     )
     db.commit()
     return {"ok": True}

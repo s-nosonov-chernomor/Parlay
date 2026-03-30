@@ -6,7 +6,8 @@ from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
-from app.api.deps import get_db
+
+from app.api.deps import get_db, require_authenticated
 from app.api.auth import require_token
 from app.services.query_service import QueryService
 from app.services.excel_export import build_xlsx
@@ -25,7 +26,7 @@ svc = QueryService()
 
 
 @router.post("/run", response_model=QueryRunOut)
-def query_run(payload: QueryRunIn, db: Session = Depends(get_db)):
+def query_run(payload: QueryRunIn, current_user=Depends(require_authenticated), db: Session = Depends(get_db)):
     rows, meta = svc.run(
         db=db,
         ui_ids=payload.ui_ids,
@@ -44,7 +45,7 @@ def query_run(payload: QueryRunIn, db: Session = Depends(get_db)):
 
 
 @router.post("/export.xlsx", dependencies=[Depends(require_token)])
-def query_export_xlsx(payload: QueryRunIn, db: Session = Depends(get_db)):
+def query_export_xlsx(payload: QueryRunIn, current_user=Depends(require_authenticated), db: Session = Depends(get_db)):
     rows, meta = svc.run(
         db=db,
         ui_ids=payload.ui_ids,
@@ -67,7 +68,7 @@ def query_export_xlsx(payload: QueryRunIn, db: Session = Depends(get_db)):
     )
 
 @router.post("/dli", response_model=QueryDliOut)
-def query_dli(payload: QueryDliIn, db: Session = Depends(get_db)):
+def query_dli(payload: QueryDliIn, current_user=Depends(require_authenticated), db: Session = Depends(get_db)):
     rows, meta = svc.calc_dli(
         db=db,
         ui_ids=payload.ui_ids,
