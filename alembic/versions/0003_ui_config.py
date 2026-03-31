@@ -15,26 +15,45 @@ depends_on = None
 
 def upgrade() -> None:
     # ----------------------------
-    # 1) ui_bindings: topic nullable + source
+    # 0) Базовые UI-таблицы
     # ----------------------------
-    # topic теперь может быть NULL (для computed/virtual bind_key)
-    op.alter_column("ui_bindings", "topic", existing_type=sa.Text(), nullable=True)
 
-    # source: откуда берём значение для bind_key
-    # mqtt | computed | constant | schedule | priva
-    op.add_column(
-        "ui_bindings",
-        sa.Column("source", sa.Text(), nullable=False, server_default=sa.text("'mqtt'")),
+    op.create_table(
+        "ui_elements",
+        sa.Column("ui_id", sa.Text(), primary_key=True),
+        sa.Column("ui_type", sa.Text(), nullable=False),
+        sa.Column("page", sa.Text(), nullable=False),
+        sa.Column("title", sa.Text(), nullable=True),
+        sa.Column("cz", sa.Integer(), nullable=True),
+        sa.Column("row_n", sa.Integer(), nullable=True),
+        sa.Column("col_n", sa.Integer(), nullable=True),
+        sa.Column("meta", postgresql.JSONB(astext_type=sa.Text()), nullable=False, server_default=sa.text("'{}'::jsonb")),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.text("now()")),
+        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.text("now()")),
     )
-
-    # небольшие индексы для быстрых выборок
     op.create_index("ix_ui_elements_page", "ui_elements", ["page"])
+
+    op.create_table(
+        "ui_bindings",
+        sa.Column("ui_id", sa.Text(), nullable=False),
+        sa.Column("bind_key", sa.Text(), nullable=False),
+        sa.Column("topic", sa.Text(), nullable=True),  # nullable для computed/virtual bind_key
+        sa.Column("source", sa.Text(), nullable=False, server_default=sa.text("'mqtt'")),
+        sa.Column("value_type", sa.Text(), nullable=True),
+        sa.Column("required", sa.Boolean(), nullable=False, server_default=sa.text("false")),
+        sa.Column("note", sa.Text(), nullable=True),
+        sa.Column("created_at", sa.DateTime(timezone=True), nullable=True, server_default=sa.text("now()")),
+        sa.Column("updated_at", sa.DateTime(timezone=True), nullable=True, server_default=sa.text("now()")),
+        sa.PrimaryKeyConstraint("ui_id", "bind_key"),
+        sa.ForeignKeyConstraint(["ui_id"], ["ui_elements.ui_id"], ondelete="CASCADE"),
+    )
     op.create_index("ix_ui_bindings_topic", "ui_bindings", ["topic"])
     op.create_index("ix_ui_bindings_ui_id", "ui_bindings", ["ui_id"])
 
     # ----------------------------
-    # 2) ui_element_state: состояние режима на элемент
+    # 1) ui_element_state: состояние режима на элемент
     # ----------------------------
+
     op.create_table(
         "ui_element_state",
         sa.Column("ui_id", sa.Text(), primary_key=True),
@@ -47,8 +66,10 @@ def upgrade() -> None:
     op.create_index("ix_ui_element_state_schedule", "ui_element_state", ["schedule_id"])
 
     # ----------------------------
-    # 3) ui_hw_sources + ui_hw_members: аппаратный переключатель режима (один на много линий)
+    # 2) ui_hw_sources + ui_hw_members
+    # аппаратный переключатель режима
     # ----------------------------
+
     op.create_table(
         "ui_hw_sources",
         sa.Column("source_id", sa.Text(), primary_key=True),  # например cabinet:SHD-12
@@ -70,8 +91,10 @@ def upgrade() -> None:
     op.create_index("ix_ui_hw_members_ui_id", "ui_hw_members", ["ui_id"])
 
     # ----------------------------
-    # 4) ui_priva_bindings: эталонные топики PRIVA, по которым зеркалируемся
+    # 3) ui_priva_bindings
+    # эталонные топики PRIVA, по которым зеркалируемся
     # ----------------------------
+
     op.create_table(
         "ui_priva_bindings",
         sa.Column("ui_id", sa.Text(), nullable=False),
@@ -85,8 +108,10 @@ def upgrade() -> None:
     op.create_index("ix_ui_priva_bindings_ui", "ui_priva_bindings", ["ui_id"])
 
     # ----------------------------
-    # 5) schedules + schedule_events: расписания (точки изменения в течение суток)
+    # 4) schedules + schedule_events
+    # расписания (точки изменения в течение суток)
     # ----------------------------
+
     op.create_table(
         "schedules",
         sa.Column("schedule_id", sa.Text(), primary_key=True),  # schedule_1
@@ -100,12 +125,11 @@ def upgrade() -> None:
         "schedule_events",
         sa.Column("schedule_id", sa.Text(), nullable=False),
         sa.Column("bind_key", sa.Text(), nullable=False),
-        sa.Column("at_time", sa.Time(), nullable=False),  # время суток
+        sa.Column("at_time", sa.Time(), nullable=False),
         sa.Column("value_num", sa.Float(), nullable=True),
         sa.Column("value_text", sa.Text(), nullable=True),
         sa.PrimaryKeyConstraint("schedule_id", "bind_key", "at_time"),
         sa.ForeignKeyConstraint(["schedule_id"], ["schedules.schedule_id"], ondelete="CASCADE"),
-        # Проверка: либо num, либо text, либо оба NULL (разрешим оба NULL? лучше запретить)
         sa.CheckConstraint(
             "(value_num IS NOT NULL AND value_text IS NULL) OR (value_num IS NULL AND value_text IS NOT NULL)",
             name="ck_schedule_events_value_oneof",
@@ -114,14 +138,14 @@ def upgrade() -> None:
     op.create_index("ix_schedule_events_lookup", "schedule_events", ["schedule_id", "bind_key", "at_time"])
 
     # ----------------------------
-    # 6) Снять server_default с ui_bindings.source (чтобы не “прилипал” в DDL)
+    # 5) Снять server_default с ui_bindings.source
+    # чтобы дефолт не тащился дальше в DDL
     # ----------------------------
+
     op.alter_column("ui_bindings", "source", server_default=None)
 
 
 def downgrade() -> None:
-    # В обратном порядке
-
     op.drop_index("ix_schedule_events_lookup", table_name="schedule_events")
     op.drop_table("schedule_events")
     op.drop_table("schedules")
@@ -142,7 +166,7 @@ def downgrade() -> None:
 
     op.drop_index("ix_ui_bindings_ui_id", table_name="ui_bindings")
     op.drop_index("ix_ui_bindings_topic", table_name="ui_bindings")
-    op.drop_index("ix_ui_elements_page", table_name="ui_elements")
+    op.drop_table("ui_bindings")
 
-    op.drop_column("ui_bindings", "source")
-    op.alter_column("ui_bindings", "topic", existing_type=sa.Text(), nullable=False)
+    op.drop_index("ix_ui_elements_page", table_name="ui_elements")
+    op.drop_table("ui_elements")
