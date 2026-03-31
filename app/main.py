@@ -211,18 +211,48 @@ app.include_router(auth_router, prefix="/v1")
 # Frontend (Vite dist) serving
 # =========================
 DIST_DIR = resource_path("frontend/dist")
+ASSETS_DIR = DIST_DIR / "assets"
 
 if DIST_DIR.exists():
-    # 1) Отдаем /assets/* и все файлы dist
-    app.mount("/", StaticFiles(directory=str(DIST_DIR), html=True), name="frontend")
+    # 1) статика Vite
+    if ASSETS_DIR.exists():
+        app.mount("/assets", StaticFiles(directory=str(ASSETS_DIR)), name="assets")
 
-    # 2) SPA fallback для react-router (важно: НЕ ломать /v1/*)
+    # 2) отдельные корневые файлы dist
+    @app.get("/favicon.ico")
+    def favicon():
+        f = DIST_DIR / "favicon.ico"
+        if f.exists():
+            return FileResponse(str(f))
+        return {"detail": "Not found"}
+
+    @app.get("/vite.svg")
+    def vite_svg():
+        f = DIST_DIR / "vite.svg"
+        if f.exists():
+            return FileResponse(str(f))
+        return {"detail": "Not found"}
+
+    @app.get("/persay.ico")
+    def persay_ico():
+        f = DIST_DIR / "persay.ico"
+        if f.exists():
+            return FileResponse(str(f))
+        return {"detail": "Not found"}
+
+    # 3) корень SPA
+    @app.get("/")
+    def spa_index():
+        return FileResponse(str(DIST_DIR / "index.html"))
+
+    # 4) SPA fallback для react-router
     @app.get("/{full_path:path}")
     def spa_fallback(full_path: str):
         if full_path.startswith("v1/") or full_path == "v1":
             return {"detail": "Not found"}
-        index = DIST_DIR / "index.html"
-        return FileResponse(str(index))
+        return FileResponse(str(DIST_DIR / "index.html"))
+
+# =========================================================================================
 
 if __name__ == "__main__":
     import uvicorn
