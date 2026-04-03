@@ -1,7 +1,8 @@
 # app/db/par_dli_crud.py
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import select, update, delete, and_
 from sqlalchemy.orm import Session
@@ -15,7 +16,6 @@ from app.db.models_ui import (
 )
 from app.services.bind_resolver import resolve_binding_topic
 
-
 def _cfg_to_dict(cfg: UiParDliConfig) -> dict:
     return {
         "par_id": cfg.par_id,
@@ -27,7 +27,6 @@ def _cfg_to_dict(cfg: UiParDliConfig) -> dict:
         "dli_cap_umol": cfg.dli_cap_umol,
         "off_window_start": cfg.off_window_start,
         "off_window_end": cfg.off_window_end,
-        "fixture_umol_100": cfg.fixture_umol_100,
         "correction_interval_s": cfg.correction_interval_s,
         "par_top_bind_key": cfg.par_top_bind_key,
         "par_sum_bind_key": cfg.par_sum_bind_key,
@@ -64,7 +63,7 @@ def create_config(session: Session, payload) -> dict:
         dli_cap_umol=payload.dli_cap_umol,
         off_window_start=payload.off_window_start,
         off_window_end=payload.off_window_end,
-        fixture_umol_100=payload.fixture_umol_100,
+        fixture_umol_100=1.0,  # legacy field, больше не используется
         correction_interval_s=payload.correction_interval_s,
         par_top_bind_key=payload.par_top_bind_key,
         par_sum_bind_key=payload.par_sum_bind_key,
@@ -175,6 +174,114 @@ def load_last_before(
     if not row:
         return None
     return row[0], row[1]
+
+def _as_float(vnum: float | None, vtxt: str | None) -> float | None:
+    if vnum is not None:
+        return float(vnum)
+    if vtxt is None:
+        return None
+    try:
+        return float(str(vtxt).strip().replace(",", "."))
+    except Exception:
+        return None
+
+
+def _daily_reset_boundaries(start_ts: datetime, end_ts: datetime, tz_name: str) -> list[datetime]:
+    """
+    Возвращает UTC timestamps локальных полуночей внутри интервала (start_ts, end_ts].
+    """
+    tz = ZoneInfo(tz_name)
+
+    start_local = start_ts.astimezone(tz)
+    end_local = end_ts.astimezone(tz)
+
+    next_midnight_local = start_local.replace(hour=0, minute=0, second=0, microsecond=0)
+    if next_midnight_local <= start_local:
+        next_midnight_local = next_midnight_local + timedelta(days=1)
+
+    out: list[datetime] = []
+    cur = next_midnight_local
+    while cur <= end_local:
+        out.append(cur.astimezone(timezone.utc))
+        cur = cur + timedelta(days=1)
+    return out
+
+
+def calc_dli_series_for_topic(
+    session: Session,
+    topic: str,
+    start_ts: datetime,
+    end_ts: datetime,
+    cap_umol: float | None,
+    mode: str,
+    tz_name: str = "Europe/Riga",
+) -> list[tuple[datetime, float, float]]:
+    """
+    Считает ряд накопления DLI по одному topic датчика PAR.
+
+    Возвращает список точек:
+    (ts, raw_dli_mol, capped_dli_mol)
+
+    mode:
+      - 'daily'      -> сброс в локальную полночь Europe/Riga
+      - 'cumulative' -> накопление за весь диапазон
+    """
+    if end_ts <= start_ts:
+        return []
+
+    initial = load_last_before(session, topic, start_ts)
+    current_par = max(0.0, _as_float(initial[0], initial[1]) or 0.0) if initial else 0.0
+
+    par_events = load_series(session, topic, start_ts, end_ts)
+
+    events: list[tuple[datetime, str, float | None, str | None]] = []
+    for ts, vnum, vtxt in par_events:
+        events.append((ts, "__par__", vnum, vtxt))
+
+    if mode == "daily":
+        for boundary_ts in _daily_reset_boundaries(start_ts, end_ts, tz_name):
+            events.append((boundary_ts, "__reset__", None, None))
+
+    # гарантируем наличие конечной точки
+    events.append((end_ts, "__end__", None, None))
+    events.sort(key=lambda x: x[0])
+
+    raw = 0.0
+    capped = 0.0
+    prev_ts = start_ts
+
+    rows: list[tuple[datetime, float, float]] = []
+    rows.append((start_ts, 0.0, 0.0))
+
+    for ts, kind, vnum, vtxt in events:
+        dt_s = max(0.0, (ts - prev_ts).total_seconds())
+
+        if dt_s > 0:
+            raw += current_par * dt_s / 1_000_000.0
+            capped_par = min(current_par, cap_umol) if cap_umol is not None else current_par
+            capped += capped_par * dt_s / 1_000_000.0
+
+        if kind == "__reset__":
+            raw = 0.0
+            capped = 0.0
+            rows.append((ts, 0.0, 0.0))
+        else:
+            if kind == "__par__":
+                current_par = max(0.0, _as_float(vnum, vtxt) or 0.0)
+
+            rows.append((ts, raw, capped))
+
+        prev_ts = ts
+
+    # уберем возможные подряд дубликаты по ts
+    compact: list[tuple[datetime, float, float]] = []
+    for item in rows:
+        if compact and compact[-1][0] == item[0]:
+            compact[-1] = item
+        else:
+            compact.append(item)
+
+    return compact
 
 def calc_dli_for_line(
     session: Session,

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Literal
 from pydantic import BaseModel, Field
 
 
@@ -36,24 +37,28 @@ class QueryRunOut(BaseModel):
 
 class QueryDliIn(BaseModel):
     ui_ids: list[str] = Field(..., description="Выбранные линии (ui_id карточек)")
-    par_sum_bind_key: str = Field(..., description="bind_key нижнего суммарного PAR датчика")
-    enabled_bind_keys: list[str] = Field(..., description="bind_key включения света")
+    dli_bind_key: str = Field(..., description="bind_key датчика, по которому считаем DLI")
     start: datetime
     end: datetime
+    mode: Literal["daily", "cumulative"] = Field(
+        default="daily",
+        description="daily — сброс в 00:00 Europe/Riga; cumulative — накопление за весь период",
+    )
     dli_cap_umol: float | None = Field(default=None, description="Ограничение PAR для capped DLI")
-    limit: int = Field(default=200000, description="Предохранитель")
+    limit: int = Field(default=200000, description="Предохранитель на кол-во строк")
 
 
 class QueryDliRowOut(BaseModel):
+    ts: datetime
     ui_id: str
     source_id: str | None = None
     zone_code: str | None = None
 
-    par_sum_topic: str
-    enabled_topics: list[str]
+    bind_key: str
+    topic: str
 
-    dli_raw_mol: float
-    dli_capped_mol: float
+    raw_dli_mol: float
+    capped_dli_mol: float
 
 
 class QueryDliOut(BaseModel):

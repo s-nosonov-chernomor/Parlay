@@ -6,7 +6,6 @@ from fastapi import APIRouter, Depends
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
-
 from app.api.deps import get_db, require_authenticated
 from app.api.auth import require_token
 from app.services.query_service import QueryService
@@ -67,16 +66,18 @@ def query_export_xlsx(payload: QueryRunIn, current_user=Depends(require_authenti
         headers=headers,
     )
 
+
 @router.post("/dli", response_model=QueryDliOut)
 def query_dli(payload: QueryDliIn, current_user=Depends(require_authenticated), db: Session = Depends(get_db)):
     rows, meta = svc.calc_dli(
         db=db,
         ui_ids=payload.ui_ids,
-        par_sum_bind_key=payload.par_sum_bind_key,
-        enabled_bind_keys=payload.enabled_bind_keys,
+        dli_bind_key=payload.dli_bind_key,
         start=payload.start,
         end=payload.end,
+        mode=payload.mode,
         dli_cap_umol=payload.dli_cap_umol,
+        limit=payload.limit,
     )
 
     return {

@@ -49,7 +49,7 @@ def create_par_dli_config(
         action="par_dli_create",
         entity_type="par_dli",
         entity_id=payload.par_id,
-        value_json=payload.model_dump(),
+        value_json=payload.model_dump(mode="json"),
     )
     db.commit()
     return UiParDliConfigOut(**row)
@@ -71,7 +71,7 @@ def update_par_dli_config(
         action="par_dli_update",
         entity_type="par_dli",
         entity_id=par_id,
-        value_json=payload.model_dump(exclude_unset=True),
+        value_json=payload.model_dump(mode="json", exclude_unset=True),
     )
     db.commit()
     return UiParDliConfigOut(**row)

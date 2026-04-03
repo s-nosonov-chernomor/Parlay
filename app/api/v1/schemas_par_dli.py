@@ -1,5 +1,4 @@
 # app/api/v1/schemas_par_dli.py
-
 from __future__ import annotations
 
 from datetime import datetime, time
@@ -12,16 +11,15 @@ class UiParDliConfigIn(BaseModel):
 
     start_time: time
 
-    ppfd_setpoint_umol: float = Field(..., ge=0, description="Уставка регулирования по верхнему PAR")
-    par_deadband_umol: float = Field(..., ge=0, description="Порог чувствительности регулирования")
+    ppfd_setpoint_umol: float = Field(..., ge=0, description="Целевая уставка по нижнему датчику PAR")
+    par_deadband_umol: float = Field(..., ge=0, description="Мертвая зона регулирования по нижнему датчику")
 
-    dli_target_mol: float = Field(..., ge=0, description="Целевой DLI")
-    dli_cap_umol: float | None = Field(default=None, ge=0, description="Порог ограничения DLI, если нужен")
+    dli_target_mol: float = Field(..., ge=0, description="Целевой DLI за сутки")
+    dli_cap_umol: float | None = Field(default=None, ge=0, description="Ограничение PAR для полезного DLI")
 
     off_window_start: time
     off_window_end: time
 
-    fixture_umol_100: float = Field(..., gt=0, description="Сколько umol/m2/s дает 100% ШИМ")
     correction_interval_s: int = Field(..., gt=0, description="Период коррекции")
 
     par_top_bind_key: str
@@ -67,7 +65,6 @@ class UiParDliConfigUpdateIn(BaseModel):
     off_window_start: time | None = None
     off_window_end: time | None = None
 
-    fixture_umol_100: float | None = Field(default=None, gt=0)
     correction_interval_s: int | None = Field(default=None, gt=0)
 
     par_top_bind_key: str | None = None
@@ -95,7 +92,6 @@ class UiParDliConfigOut(BaseModel):
     off_window_start: time
     off_window_end: time
 
-    fixture_umol_100: float
     correction_interval_s: int
 
     par_top_bind_key: str

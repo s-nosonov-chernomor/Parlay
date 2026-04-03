@@ -13,9 +13,6 @@ from app.db.models_ui import UiElement, UiBinding, UiHwMember
 from app.db.models_sources import SourceBinding
 from app.db import par_dli_crud
 
-from sqlalchemy import text, cast
-from sqlalchemy.dialects.postgresql import INTERVAL
-
 
 @dataclass(frozen=True, slots=True)
 class ResolvedBinding:
@@ -132,11 +129,12 @@ class QueryService:
         self,
         db: Session,
         ui_ids: list[str],
-        par_sum_bind_key: str,
-        enabled_bind_keys: list[str],
+        dli_bind_key: str,
         start: datetime,
         end: datetime,
+        mode: str,
         dli_cap_umol: float | None,
+        limit: int,
     ) -> tuple[list[dict], dict]:
         if not ui_ids:
             return [], {"requested_ui_ids": 0, "resolved": 0}
@@ -148,49 +146,50 @@ class QueryService:
         resolved_count = 0
 
         for ui_id in ui_ids:
-            par_sum_resolved = self.resolve_one_binding(db, ui_id, par_sum_bind_key)
-            if not par_sum_resolved:
+            resolved = self.resolve_one_binding(db, ui_id, dli_bind_key)
+            if not resolved:
                 continue
 
-            enabled_topics: list[str] = []
-            for bk in enabled_bind_keys:
-                r = self.resolve_one_binding(db, ui_id, bk)
-                if r:
-                    enabled_topics.append(r.topic)
-
-            if not enabled_topics:
-                continue
-
-            dli_raw, dli_capped = par_dli_crud.calc_dli_for_line(
+            series = par_dli_crud.calc_dli_series_for_topic(
                 session=db,
-                par_sum_topic=par_sum_resolved.topic,
-                enabled_topics=enabled_topics,
+                topic=resolved.topic,
                 start_ts=start,
                 end_ts=end,
                 cap_umol=dli_cap_umol,
+                mode=mode,
+                tz_name="Europe/Riga",
             )
 
-            rows_out.append(
-                dict(
-                    ui_id=ui_id,
-                    source_id=ui_to_source.get(ui_id),
-                    zone_code=(ui_meta.get(ui_id) or {}).get("zone_code"),
-                    par_sum_topic=par_sum_resolved.topic,
-                    enabled_topics=enabled_topics,
-                    dli_raw_mol=float(dli_raw),
-                    dli_capped_mol=float(dli_capped),
+            for ts, raw_dli_mol, capped_dli_mol in series:
+                rows_out.append(
+                    dict(
+                        ts=ts,
+                        ui_id=ui_id,
+                        source_id=ui_to_source.get(ui_id),
+                        zone_code=(ui_meta.get(ui_id) or {}).get("zone_code"),
+                        bind_key=dli_bind_key,
+                        topic=resolved.topic,
+                        raw_dli_mol=float(raw_dli_mol),
+                        capped_dli_mol=float(capped_dli_mol),
+                    )
                 )
-            )
+
             resolved_count += 1
+
+        rows_out.sort(key=lambda x: (x["ui_id"], x["ts"]))
+
+        if limit and limit > 0:
+            rows_out = rows_out[:limit]
 
         meta = {
             "requested_ui_ids": len(ui_ids),
             "resolved": resolved_count,
-            "par_sum_bind_key": par_sum_bind_key,
-            "enabled_bind_keys": enabled_bind_keys,
+            "dli_bind_key": dli_bind_key,
             "start": start.isoformat(),
             "end": end.isoformat(),
+            "mode": mode,
             "dli_cap_umol": dli_cap_umol,
+            "limit": limit,
         }
         return rows_out, meta
 
@@ -239,9 +238,21 @@ class QueryService:
         rows_out: list[dict] = []
 
         if bucket_s and bucket_s > 0:
-            # агрегируем по времени (avg для чисел, max для текста как заглушка)
-            bucket_interval = cast(text(":bucket_s || ' seconds'"), INTERVAL)
-            bucket = func.date_bin(bucket_interval, Reading.ts, start)
+            # PostgreSQL 12: date_bin() ещё нет, поэтому bucket считаем через epoch.
+            # Формула:
+            #   bucket = start + floor((ts - start) / bucket_s) * bucket_s
+            #
+            # Делаем это в UTC epoch и возвращаем timestamptz через to_timestamp().
+            bucket = func.to_timestamp(
+                (
+                    func.floor(
+                        (
+                            func.extract("epoch", Reading.ts)
+                            - func.extract("epoch", start)
+                        ) / float(bucket_s)
+                    ) * float(bucket_s)
+                ) + func.extract("epoch", start)
+            )
 
             q = (
                 select(
@@ -262,7 +273,7 @@ class QueryService:
                 .limit(limit)
             )
 
-            data = db.execute(q, {"bucket_s": int(bucket_s)}).all()
+            data = db.execute(q).all()
             for pid, ts, vnum, vtext in data:
                 for meta in pid_to_list.get(int(pid), []):
                     rows_out.append(
