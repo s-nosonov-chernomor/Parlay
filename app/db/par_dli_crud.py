@@ -1,7 +1,6 @@
-# app/db/par_dli_crud.py
 from __future__ import annotations
 
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone, timedelta, time
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import select, update, delete, and_
@@ -16,27 +15,46 @@ from app.db.models_ui import (
 )
 from app.services.bind_resolver import resolve_binding_topic
 
+
 def _cfg_to_dict(cfg: UiParDliConfig) -> dict:
     return {
         "par_id": cfg.par_id,
         "title": cfg.title,
+
         "start_time": cfg.start_time,
-        "ppfd_setpoint_umol": cfg.ppfd_setpoint_umol,
-        "par_deadband_umol": cfg.par_deadband_umol,
+        "light_end_time": cfg.light_end_time,
+        "agro_day_start_time": cfg.agro_day_start_time,
+
+        "ppfd_min_umol": cfg.ppfd_min_umol,
+        "ppfd_max_umol": cfg.ppfd_max_umol,
+
         "dli_target_mol": cfg.dli_target_mol,
         "dli_cap_umol": cfg.dli_cap_umol,
+
         "off_window_start": cfg.off_window_start,
         "off_window_end": cfg.off_window_end,
+
         "correction_interval_s": cfg.correction_interval_s,
+        "ramp_up_s": cfg.ramp_up_s,
+        "max_pwm_step_pct": cfg.max_pwm_step_pct,
+
         "par_top_bind_key": cfg.par_top_bind_key,
         "par_sum_bind_key": cfg.par_sum_bind_key,
+
         "enabled_bind_keys": cfg.enabled_bind_keys,
         "dim_bind_keys": cfg.dim_bind_keys,
+
         "use_dli_cap": cfg.use_dli_cap,
         "tz": cfg.tz,
         "updated_at": cfg.updated_at,
     }
 
+def _sync_legacy_fields(row: UiParDliConfig) -> None:
+    # Старые поля больше не используются новой логикой,
+    # но остаются заполненными для совместимости БД.
+    row.ppfd_setpoint_umol = (float(row.ppfd_min_umol) + float(row.ppfd_max_umol)) / 2.0
+    row.par_deadband_umol = 0.0
+    row.fixture_umol_100 = 1.0
 
 def list_configs(session: Session) -> list[dict]:
     rows = session.execute(
@@ -44,31 +62,43 @@ def list_configs(session: Session) -> list[dict]:
     ).scalars().all()
     return [_cfg_to_dict(r) for r in rows]
 
-
 def get_config(session: Session, par_id: str) -> dict | None:
     row = session.execute(
         select(UiParDliConfig).where(UiParDliConfig.par_id == par_id)
     ).scalar_one_or_none()
     return _cfg_to_dict(row) if row else None
 
-
 def create_config(session: Session, payload) -> dict:
     row = UiParDliConfig(
         par_id=payload.par_id,
         title=payload.title,
+
         start_time=payload.start_time,
-        ppfd_setpoint_umol=payload.ppfd_setpoint_umol,
-        par_deadband_umol=payload.par_deadband_umol,
+        light_end_time=payload.light_end_time,
+        agro_day_start_time=payload.agro_day_start_time,
+
+        ppfd_setpoint_umol=(float(payload.ppfd_min_umol) + float(payload.ppfd_max_umol)) / 2.0,
+        par_deadband_umol=0.0,
+
+        ppfd_min_umol=payload.ppfd_min_umol,
+        ppfd_max_umol=payload.ppfd_max_umol,
+
         dli_target_mol=payload.dli_target_mol,
         dli_cap_umol=payload.dli_cap_umol,
+
         off_window_start=payload.off_window_start,
         off_window_end=payload.off_window_end,
-        fixture_umol_100=1.0,  # legacy field, больше не используется
+
+        fixture_umol_100=1.0,
         correction_interval_s=payload.correction_interval_s,
+        ramp_up_s=payload.ramp_up_s,
+        max_pwm_step_pct=payload.max_pwm_step_pct,
+
         par_top_bind_key=payload.par_top_bind_key,
         par_sum_bind_key=payload.par_sum_bind_key,
         enabled_bind_keys=payload.enabled_bind_keys,
         dim_bind_keys=payload.dim_bind_keys,
+
         use_dli_cap=payload.use_dli_cap,
         tz=payload.tz,
     )
@@ -76,7 +106,6 @@ def create_config(session: Session, payload) -> dict:
     session.flush()
     session.refresh(row)
     return _cfg_to_dict(row)
-
 
 def update_config(session: Session, par_id: str, payload) -> dict | None:
     row = session.execute(
@@ -89,11 +118,12 @@ def update_config(session: Session, par_id: str, payload) -> dict | None:
     for k, v in data.items():
         setattr(row, k, v)
 
+    _sync_legacy_fields(row)
+
     session.add(row)
     session.flush()
     session.refresh(row)
     return _cfg_to_dict(row)
-
 
 def delete_config(session: Session, par_id: str) -> int:
     # сначала отвяжем линии от сценария
@@ -118,9 +148,24 @@ def list_ui_for_par(session: Session, par_id: str) -> list[str]:
     ).all()
     return [str(ui_id) for (ui_id,) in rows]
 
-def local_day_start_utc(now_local: datetime) -> datetime:
-    local_midnight = now_local.replace(hour=0, minute=0, second=0, microsecond=0)
-    return local_midnight.astimezone(timezone.utc)
+
+def local_day_start_utc(now_local: datetime, day_start_time: time | None = None) -> datetime:
+    """
+    Возвращает UTC-время начала текущих локальных суток/агросуток.
+    Если day_start_time=None -> обычные сутки с 00:00.
+    Если задано, например 06:00:00 -> агросутки начинаются в 06:00 local time.
+    """
+    start_t = day_start_time or time(0, 0, 0)
+    local_start = now_local.replace(
+        hour=start_t.hour,
+        minute=start_t.minute,
+        second=start_t.second,
+        microsecond=0,
+    )
+    if now_local < local_start:
+        local_start -= timedelta(days=1)
+    return local_start.astimezone(timezone.utc)
+
 
 def load_series(
     session: Session,
@@ -147,6 +192,7 @@ def load_series(
     ).all()
 
     return [(ts, vnum, vtxt) for ts, vnum, vtxt in rows]
+
 
 def load_last_before(
     session: Session,
@@ -175,6 +221,7 @@ def load_last_before(
         return None
     return row[0], row[1]
 
+
 def _as_float(vnum: float | None, vtxt: str | None) -> float | None:
     if vnum is not None:
         return float(vnum)
@@ -186,24 +233,40 @@ def _as_float(vnum: float | None, vtxt: str | None) -> float | None:
         return None
 
 
-def _daily_reset_boundaries(start_ts: datetime, end_ts: datetime, tz_name: str) -> list[datetime]:
+def _agro_daily_reset_boundaries(
+    start_ts: datetime,
+    end_ts: datetime,
+    tz_name: str,
+    agro_day_start_time: time | None,
+) -> list[datetime]:
     """
-    Возвращает UTC timestamps локальных полуночей внутри интервала (start_ts, end_ts].
+    Возвращает UTC timestamps границ агросуток внутри интервала (start_ts, end_ts].
+
+    Пример:
+    agro_day_start_time = 06:00:00
+    => границы будут в 06:00 local time.
     """
     tz = ZoneInfo(tz_name)
+    start_t = agro_day_start_time or time(0, 0, 0)
 
     start_local = start_ts.astimezone(tz)
     end_local = end_ts.astimezone(tz)
 
-    next_midnight_local = start_local.replace(hour=0, minute=0, second=0, microsecond=0)
-    if next_midnight_local <= start_local:
-        next_midnight_local = next_midnight_local + timedelta(days=1)
+    first_boundary_local = start_local.replace(
+        hour=start_t.hour,
+        minute=start_t.minute,
+        second=start_t.second,
+        microsecond=0,
+    )
+    if first_boundary_local <= start_local:
+        first_boundary_local = first_boundary_local + timedelta(days=1)
 
     out: list[datetime] = []
-    cur = next_midnight_local
+    cur = first_boundary_local
     while cur <= end_local:
         out.append(cur.astimezone(timezone.utc))
         cur = cur + timedelta(days=1)
+
     return out
 
 
@@ -215,6 +278,7 @@ def calc_dli_series_for_topic(
     cap_umol: float | None,
     mode: str,
     tz_name: str = "Europe/Riga",
+    agro_day_start_time: time | None = None,
 ) -> list[tuple[datetime, float, float]]:
     """
     Считает ряд накопления DLI по одному topic датчика PAR.
@@ -223,7 +287,7 @@ def calc_dli_series_for_topic(
     (ts, raw_dli_mol, capped_dli_mol)
 
     mode:
-      - 'daily'      -> сброс в локальную полночь Europe/Riga
+      - 'daily'      -> сброс по агросуткам в tz_name
       - 'cumulative' -> накопление за весь диапазон
     """
     if end_ts <= start_ts:
@@ -239,7 +303,12 @@ def calc_dli_series_for_topic(
         events.append((ts, "__par__", vnum, vtxt))
 
     if mode == "daily":
-        for boundary_ts in _daily_reset_boundaries(start_ts, end_ts, tz_name):
+        for boundary_ts in _agro_daily_reset_boundaries(
+            start_ts=start_ts,
+            end_ts=end_ts,
+            tz_name=tz_name,
+            agro_day_start_time=agro_day_start_time,
+        ):
             events.append((boundary_ts, "__reset__", None, None))
 
     # гарантируем наличие конечной точки
@@ -282,6 +351,7 @@ def calc_dli_series_for_topic(
             compact.append(item)
 
     return compact
+
 
 def calc_dli_for_line(
     session: Session,
@@ -377,6 +447,7 @@ def calc_dli_for_line(
 
     return raw, capped
 
+
 def load_manual_topic(session: Session, ui_id: str) -> str | None:
     return session.execute(
         select(UiHwSource.manual_topic)
@@ -385,6 +456,7 @@ def load_manual_topic(session: Session, ui_id: str) -> str | None:
         .where(UiHwMember.ui_id == ui_id)
         .limit(1)
     ).scalar_one_or_none()
+
 
 def load_last_values(
     session: Session,

@@ -1,7 +1,6 @@
-# app/api/v1/schemas_query.py
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, time
 from typing import Literal
 from pydantic import BaseModel, Field
 
@@ -42,7 +41,11 @@ class QueryDliIn(BaseModel):
     end: datetime
     mode: Literal["daily", "cumulative"] = Field(
         default="daily",
-        description="daily — сброс в 00:00 Europe/Riga; cumulative — накопление за весь период",
+        description="daily — посуточно по агросуткам; cumulative — накопление за весь период",
+    )
+    agro_day_start_time: time | None = Field(
+        default=None,
+        description="Начало агросуток, например 06:00:00. Используется только для mode='daily'",
     )
     dli_cap_umol: float | None = Field(default=None, description="Ограничение PAR для capped DLI")
     limit: int = Field(default=200000, description="Предохранитель на кол-во строк")

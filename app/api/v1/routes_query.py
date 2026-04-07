@@ -1,4 +1,3 @@
-# app/api/v1/routes_query.py
 from __future__ import annotations
 
 from datetime import datetime
@@ -76,6 +75,7 @@ def query_dli(payload: QueryDliIn, current_user=Depends(require_authenticated), 
         start=payload.start,
         end=payload.end,
         mode=payload.mode,
+        agro_day_start_time=payload.agro_day_start_time,
         dli_cap_umol=payload.dli_cap_umol,
         limit=payload.limit,
     )

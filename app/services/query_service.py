@@ -1,8 +1,7 @@
-# app/services/query_service.py
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, time
 from typing import Iterable
 
 from sqlalchemy import select, func, and_
@@ -39,7 +38,6 @@ class QueryService:
         return out
 
     def _load_membership(self, db: Session, ui_ids: list[str]) -> dict[str, str]:
-        # ui_id -> source_id
         rows = db.execute(
             select(UiHwMember.ui_id, UiHwMember.source_id)
             .where(UiHwMember.ui_id.in_(ui_ids))
@@ -56,7 +54,6 @@ class QueryService:
         ui_meta = self._load_ui_meta(db, ui_ids)
         ui_to_source = self._load_membership(db, ui_ids)
 
-        # 1) линейные биндинги
         line_rows = db.execute(
             select(UiBinding.ui_id, UiBinding.bind_key, UiBinding.topic, UiBinding.note)
             .where(
@@ -71,8 +68,6 @@ class QueryService:
             if topic:
                 line_map[(ui_id, bk)] = (topic, note)
 
-        # 2) щитовые биндинги
-        # соберём все source_id нужных линий
         source_ids = sorted(set(ui_to_source.values()))
         source_rows = db.execute(
             select(SourceBinding.source_id, SourceBinding.bind_key, SourceBinding.topic, SourceBinding.note)
@@ -105,7 +100,7 @@ class QueryService:
                             topic, note = st
 
                 if not topic:
-                    continue  # bind_key не найден для этой линии (это нормально)
+                    continue
 
                 resolved.append(
                     ResolvedBinding(
@@ -133,6 +128,7 @@ class QueryService:
         start: datetime,
         end: datetime,
         mode: str,
+        agro_day_start_time: time | None,
         dli_cap_umol: float | None,
         limit: int,
     ) -> tuple[list[dict], dict]:
@@ -158,6 +154,7 @@ class QueryService:
                 cap_umol=dli_cap_umol,
                 mode=mode,
                 tz_name="Europe/Riga",
+                agro_day_start_time=agro_day_start_time,
             )
 
             for ts, raw_dli_mol, capped_dli_mol in series:
@@ -188,6 +185,7 @@ class QueryService:
             "start": start.isoformat(),
             "end": end.isoformat(),
             "mode": mode,
+            "agro_day_start_time": agro_day_start_time.isoformat() if agro_day_start_time else None,
             "dli_cap_umol": dli_cap_umol,
             "limit": limit,
         }
@@ -209,25 +207,19 @@ class QueryService:
 
         topics = sorted({r.topic for r in resolved})
 
-        # topic -> parameter_id
         pid_rows = db.execute(
             select(Parameter.topic, Parameter.id).where(Parameter.topic.in_(topics))
         ).all()
         topic_to_pid = {t: pid for t, pid in pid_rows}
 
-        # оставляем только те, что реально есть в parameter
         resolved = [r for r in resolved if r.topic in topic_to_pid]
         if not resolved:
             return [], {"resolved": 0, "topics": topics}
 
-        # сделаем lookup pid -> (ui_id, bind_key, note, topic, source_id, zone_code)
         pid_to_meta: dict[int, ResolvedBinding] = {}
         for r in resolved:
             pid = int(topic_to_pid[r.topic])
-            # если один topic вдруг привязан к нескольким ui_id — это редкость, но возможно (щитовые)
-            # тогда мы не затираем, а обработаем позже через отдельную таблицу pid->list.
-            # чтобы не усложнять — оставим 1:1 и щитовые разрулим на уровне resolved (там topic одинаковый, но ui_id разный)
-            # => делаем список:
+
         pid_to_list: dict[int, list[ResolvedBinding]] = {}
         for r in resolved:
             pid = int(topic_to_pid[r.topic])
@@ -238,11 +230,6 @@ class QueryService:
         rows_out: list[dict] = []
 
         if bucket_s and bucket_s > 0:
-            # PostgreSQL 12: date_bin() ещё нет, поэтому bucket считаем через epoch.
-            # Формула:
-            #   bucket = start + floor((ts - start) / bucket_s) * bucket_s
-            #
-            # Делаем это в UTC epoch и возвращаем timestamptz через to_timestamp().
             bucket = func.to_timestamp(
                 (
                     func.floor(
@@ -289,7 +276,6 @@ class QueryService:
                             value_text=vtext,
                         )
                     )
-
 
         else:
             q = (

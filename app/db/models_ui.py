@@ -110,12 +110,24 @@ class UiParDliConfig(Base):
     par_id: Mapped[str] = mapped_column(Text, primary_key=True)
     title: Mapped[str | None] = mapped_column(Text, nullable=True)
 
+    # разрешённый период свечения
     start_time: Mapped[dtime] = mapped_column(Time, nullable=False)
+    light_end_time: Mapped[dtime] = mapped_column(Time, nullable=False)
 
+    # начало агросуток
+    agro_day_start_time: Mapped[dtime] = mapped_column(Time, nullable=False)
+
+    # legacy-поля оставляем в модели, чтобы вставка в старую таблицу не ломалась
     ppfd_setpoint_umol: Mapped[float] = mapped_column(Float, nullable=False)
     par_deadband_umol: Mapped[float] = mapped_column(Float, nullable=False)
 
+    # новый рабочий коридор
+    ppfd_min_umol: Mapped[float] = mapped_column(Float, nullable=False)
+    ppfd_max_umol: Mapped[float] = mapped_column(Float, nullable=False)
+    ppfd_deadband_umol: Mapped[float] = mapped_column(Float, nullable=False)
+
     dli_target_mol: Mapped[float] = mapped_column(Float, nullable=False)
+    dli_carryover_mol: Mapped[float] = mapped_column(Float, nullable=False)
     dli_cap_umol: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     off_window_start: Mapped[dtime] = mapped_column(Time, nullable=False)
@@ -123,6 +135,9 @@ class UiParDliConfig(Base):
 
     fixture_umol_100: Mapped[float] = mapped_column(Float, nullable=False)
     correction_interval_s: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    ramp_up_s: Mapped[int] = mapped_column(Integer, nullable=False)
+    max_pwm_step_pct: Mapped[int] = mapped_column(Integer, nullable=False)
 
     par_top_bind_key: Mapped[str] = mapped_column(Text, nullable=False)
     par_sum_bind_key: Mapped[str] = mapped_column(Text, nullable=False)
@@ -135,27 +150,3 @@ class UiParDliConfig(Base):
 
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
-# class UiParDliState(Base):
-#     __tablename__ = "ui_par_dli_state"
-#
-#     ui_id: Mapped[str] = mapped_column(
-#         ForeignKey("ui_elements.ui_id", ondelete="CASCADE"),
-#         primary_key=True,
-#     )
-#
-#     local_date: Mapped[date] = mapped_column(nullable=False)
-#
-#     dli_raw_mol: Mapped[float] = mapped_column(Float, nullable=False, server_default="0")
-#     dli_capped_mol: Mapped[float] = mapped_column(Float, nullable=False, server_default="0")
-#
-#     last_calc_ts: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-#     last_sum_par_umol: Mapped[float | None] = mapped_column(Float, nullable=True)
-#
-#     last_control_ts: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-#     last_pwm_pct: Mapped[float | None] = mapped_column(Float, nullable=True)
-#     last_enabled: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
-#
-#     target_reached_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-#     forced_off: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default="false")
-#
-#     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
