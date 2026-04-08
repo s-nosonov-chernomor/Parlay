@@ -1,3 +1,4 @@
+# app\api\v1\routes_ui_snapshot.py
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends
@@ -11,6 +12,7 @@ from app.api.v1.schemas_ui_snapshot import (
     UiStateOut,
     TopicLastOut,
     UiParDliConfigSnapOut,
+    UiParDliStateSnapOut,
 )
 from app.db import ui_snapshot_crud as crud
 
@@ -82,14 +84,17 @@ def page_snapshot(page: str, current_user=Depends(require_authenticated), db: Se
                 par_id=cfg.par_id,
                 title=cfg.title,
                 start_time=cfg.start_time,
-                ppfd_setpoint_umol=cfg.ppfd_setpoint_umol,
-                par_deadband_umol=cfg.par_deadband_umol,
+                light_end_time=cfg.light_end_time,
+                agro_day_start_time=cfg.agro_day_start_time,
+                ppfd_min_umol=cfg.ppfd_min_umol,
+                ppfd_max_umol=cfg.ppfd_max_umol,
                 dli_target_mol=cfg.dli_target_mol,
                 dli_cap_umol=cfg.dli_cap_umol,
                 off_window_start=cfg.off_window_start,
                 off_window_end=cfg.off_window_end,
-                fixture_umol_100=cfg.fixture_umol_100,
                 correction_interval_s=cfg.correction_interval_s,
+                ramp_up_s=cfg.ramp_up_s,
+                max_pwm_step_pct=cfg.max_pwm_step_pct,
                 par_top_bind_key=cfg.par_top_bind_key,
                 par_sum_bind_key=cfg.par_sum_bind_key,
                 enabled_bind_keys=cfg.enabled_bind_keys,
@@ -99,6 +104,19 @@ def page_snapshot(page: str, current_user=Depends(require_authenticated), db: Se
                 updated_at=cfg.updated_at,
             )
         )
+
+    ui_to_cfg: dict[str, object] = {}
+    for st in out_states:
+        if st.par_id and st.ui_id in ui_ids:
+            cfg = par_dli_cfg_map.get(st.par_id)
+            if cfg:
+                ui_to_cfg[st.ui_id] = cfg
+
+    par_dli_state_map = crud.load_par_dli_states_by_ui(db, ui_to_cfg)
+
+    out_par_dli_states: list[UiParDliStateSnapOut] = []
+    for ui_id, row in par_dli_state_map.items():
+        out_par_dli_states.append(UiParDliStateSnapOut(**row))
 
     return UiSnapshotOut(
         page=page,
@@ -141,4 +159,5 @@ def page_snapshot(page: str, current_user=Depends(require_authenticated), db: Se
             for topic, vals in last_map.items()
         ],
         par_dli_configs=out_par_dli_cfg,
+        par_dli_states=out_par_dli_states,
     )

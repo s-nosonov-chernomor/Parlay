@@ -1,10 +1,23 @@
+# app\db\ui_snapshot_crud.py
 from __future__ import annotations
+
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from app.db.models_ui import UiElement, UiBinding, UiElementState, UiHwMember, UiHwSource, UiParDliConfig
+from app.db.models_ui import (
+    UiElement,
+    UiBinding,
+    UiElementState,
+    UiHwMember,
+    UiHwSource,
+    UiParDliConfig,
+)
 from app.db.models import Parameter, ParameterLast
+from app.db import par_dli_crud
+from app.services.bind_resolver import resolve_binding_topic
 
 
 def load_elements(session: Session, page: str) -> list[UiElement]:
@@ -107,3 +120,65 @@ def load_par_dli_configs_by_ids(session: Session, par_ids: list[str]) -> dict[st
     ).scalars().all()
 
     return {r.par_id: r for r in rows}
+
+def load_par_dli_states_by_ui(
+    session: Session,
+    ui_to_cfg: dict[str, UiParDliConfig],
+) -> dict[str, dict]:
+    out: dict[str, dict] = {}
+
+    for ui_id, cfg in ui_to_cfg.items():
+        tz_name = (cfg.tz or "Europe/Riga").strip() or "Europe/Riga"
+        tz = ZoneInfo(tz_name)
+
+        par_sum_topic = resolve_binding_topic(session, ui_id, cfg.par_sum_bind_key)
+        if not par_sum_topic:
+            continue
+
+        now_local = datetime.now(tz)
+        now_utc = datetime.now(timezone.utc)
+        agro_day_start_utc = par_dli_crud.local_day_start_utc(
+            now_local,
+            cfg.agro_day_start_time,
+        )
+
+        series = par_dli_crud.calc_dli_series_for_topic(
+            session=session,
+            topic=par_sum_topic,
+            start_ts=agro_day_start_utc,
+            end_ts=now_utc,
+            cap_umol=cfg.dli_cap_umol,
+            mode="daily",
+            tz_name=tz_name,
+            agro_day_start_time=cfg.agro_day_start_time,
+        )
+
+        if series:
+            last_ts, dli_raw, dli_capped = series[-1]
+        else:
+            last_ts, dli_raw, dli_capped = now_utc, 0.0, 0.0
+
+        current_dli = dli_capped if cfg.use_dli_cap else dli_raw
+        progress_pct = 0.0
+        if cfg.dli_target_mol and float(cfg.dli_target_mol) > 0:
+            progress_pct = min(100.0, max(0.0, current_dli * 100.0 / float(cfg.dli_target_mol)))
+
+        out[ui_id] = {
+            "ui_id": ui_id,
+            "local_date": agro_day_start_utc.astimezone(tz).date(),
+            "dli_raw_mol": float(dli_raw),
+            "dli_capped_mol": float(dli_capped),
+            "last_calc_ts": last_ts,
+            "last_sum_par_umol": None,
+            "last_control_ts": None,
+            "last_pwm_pct": None,
+            "last_enabled": None,
+            "target_reached_at": None,
+            "forced_off": False,
+            "updated_at": now_utc,
+            "par_top_current": None,
+            "par_sum_current": None,
+            "progress_pct": float(progress_pct),
+        }
+
+    return out

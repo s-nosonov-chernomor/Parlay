@@ -1,3 +1,4 @@
+# app\db\par_dli_crud.py
 from __future__ import annotations
 
 from datetime import datetime, timezone, timedelta, time
@@ -263,7 +264,7 @@ def _agro_daily_reset_boundaries(
 
     out: list[datetime] = []
     cur = first_boundary_local
-    while cur <= end_local:
+    while cur < end_local:
         out.append(cur.astimezone(timezone.utc))
         cur = cur + timedelta(days=1)
 
