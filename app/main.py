@@ -219,23 +219,10 @@ if DIST_DIR.exists():
         app.mount("/assets", StaticFiles(directory=str(ASSETS_DIR)), name="assets")
 
     # 2) отдельные корневые файлы dist
-    @app.get("/favicon.ico")
-    def favicon():
-        f = DIST_DIR / "favicon.ico"
-        if f.exists():
-            return FileResponse(str(f))
-        return {"detail": "Not found"}
 
-    @app.get("/vite.svg")
-    def vite_svg():
-        f = DIST_DIR / "vite.svg"
-        if f.exists():
-            return FileResponse(str(f))
-        return {"detail": "Not found"}
-
-    @app.get("/persay.ico")
-    def persay_ico():
-        f = DIST_DIR / "persay.ico"
+    @app.get("/dom.png")
+    def dom_png():
+        f = DIST_DIR / "dom.png"
         if f.exists():
             return FileResponse(str(f))
         return {"detail": "Not found"}
